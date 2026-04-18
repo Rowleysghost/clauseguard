@@ -16,7 +16,13 @@ async function getClients(walletAddress, provider) {
 
 async function waitForTx(writeClient, hash) {
   const { TransactionStatus, ExecutionResult } = await import("genlayer-js/types");
-  const receipt = await writeClient.waitForTransactionReceipt({ hash, status: TransactionStatus.FINALIZED, fullTransaction: false });
+  const receipt = await writeClient.waitForTransactionReceipt({
+    hash,
+    status: TransactionStatus.ACCEPTED,
+    fullTransaction: false,
+    retries: 60,
+    interval: 2000,
+  });
   if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) throw new Error("Transaction failed on-chain");
   return receipt;
 }
@@ -48,7 +54,7 @@ export async function fetchDealCount() {
 export async function createDeal(walletAddress, provider, { terms, priceDescription, deadlineDescription, verificationUrls }) {
   const { writeClient } = await getClients(walletAddress, provider);
   if (!writeClient) throw new Error("Wallet not connected");
-  const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "create_deal", args: [terms, priceDescription, deadlineDescription, verificationUrls], value: 0n });
+  const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "create_deal", args: [terms, priceDescription, deadlineDescription, verificationUrls.join(",")], value: 0n });
   return await waitForTx(writeClient, hash);
 }
 export async function fundDeal(walletAddress, provider, dealId, amountWei) {
