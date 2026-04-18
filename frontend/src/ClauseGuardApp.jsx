@@ -855,7 +855,10 @@ export default function ClauseGuardApp() {
 
       {/* Footer */}
       <footer style={{ textAlign: "center", padding: "24px", color: "#9ca3af", fontSize: "12px" }}>
-        ClauseGuard Protocol | Built on GenLayer Bradbury Testnet | Intelligent Contracts + Optimistic Democracy
+        ClauseGuard · GenLayer Bradbury Testnet · Contract{" "}
+        <a href={`https://explorer-studio.genlayer.com/address/${process.env.NEXT_PUBLIC_CONTRACT_ADDRESS}`} target="_blank" rel="noreferrer" style={{ color: "#6366f1", textDecoration: "none", fontFamily: "monospace" }}>
+          {process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ? process.env.NEXT_PUBLIC_CONTRACT_ADDRESS.slice(0,6) + "…" + process.env.NEXT_PUBLIC_CONTRACT_ADDRESS.slice(-4) : "not configured"}
+        </a>
       </footer>
     </div>
   );
