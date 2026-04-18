@@ -4,12 +4,12 @@ const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS;
 
 async function getClients(walletAddress, provider) {
   const { createClient } = await import("genlayer-js");
-  const { testnetBradbury } = await import("genlayer-js/chains");
-  const readClient = createClient({ chain: testnetBradbury });
+  const { studionet } = await import("genlayer-js/chains");
+  const readClient = createClient({ chain: studionet });
   let writeClient = null;
   if (walletAddress && provider) {
-    writeClient = createClient({ chain: testnetBradbury, account: walletAddress, provider });
-    try { await writeClient.connect("testnetBradbury"); } catch {}
+    writeClient = createClient({ chain: studionet, account: walletAddress, provider });
+    try { await writeClient.connect("studionet"); } catch {}
   }
   return { readClient, writeClient };
 }
