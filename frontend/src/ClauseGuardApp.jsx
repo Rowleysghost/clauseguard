@@ -925,13 +925,25 @@ export default function ClauseGuardApp() {
     if (!window.ethereum) { toast("No wallet detected. Install Rabby or MetaMask.", "error"); return; }
     try {
       setWalletLoading(true);
+      // wallet_requestPermissions forces the account picker to appear even if
+      // the site already has a prior approval — lets the user switch accounts.
+      try {
+        await window.ethereum.request({
+          method: "wallet_requestPermissions",
+          params: [{ eth_accounts: {} }],
+        });
+      } catch (permErr) {
+        // User cancelled the picker — don't proceed
+        if (permErr.code === 4001) throw permErr;
+        // Some wallets don't support wallet_requestPermissions — fall through
+      }
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       if (!accounts.length) throw new Error("No accounts returned");
       setWalletAddress(accounts[0]);
       setProvider(window.ethereum);
       toast("Connected: " + shortAddr(accounts[0]), "success");
     } catch (err) {
-      toast("Connect failed: " + err.message, "error");
+      if (err.code !== 4001) toast("Connect failed: " + err.message, "error");
     } finally {
       setWalletLoading(false);
     }
