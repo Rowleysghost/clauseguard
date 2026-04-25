@@ -323,26 +323,30 @@ function useToast() {
   const [toasts, setToasts] = useState([]);
   const add = useCallback((msg, kind = "info") => {
     const id = Date.now() + Math.random();
-    setToasts((p) => [...p, { id, msg, kind }]);
-    setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 5000);
+    // Keep max 3 toasts at a time — drop oldest if full
+    setToasts((p) => {
+      const next = [...p, { id, msg, kind }];
+      return next.slice(-3);
+    });
+    setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 3500);
   }, []);
   return { toasts, add };
 }
 
 function ToastStack({ toasts, c }) {
   return (
-    <div style={{ position: "fixed", top: 80, right: 24, zIndex: 300, display: "flex", flexDirection: "column", gap: 10, width: 320 }}>
+    <div style={{ position: "fixed", top: 80, right: 24, zIndex: 300, display: "flex", flexDirection: "column", gap: 10, width: 300 }}>
       {toasts.map((t) => (
         <div key={t.id} style={{
-          padding: "14px 16px", borderRadius: 12, animation: "cg-fadeup 280ms ease both",
+          padding: "12px 15px", borderRadius: 12, animation: "cg-fadeup 280ms ease both",
           background: c.bgElev,
           border: `1px solid ${t.kind === "error" ? "rgba(255,107,138,0.4)" : t.kind === "success" ? "rgba(91,227,164,0.4)" : c.borderHi}`,
           boxShadow: "0 12px 28px -8px rgba(0,0,0,0.5)",
         }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: t.kind === "error" ? c.danger : t.kind === "success" ? c.success : c.accent2, marginBottom: 3 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: t.kind === "error" ? c.danger : t.kind === "success" ? c.success : c.accent2, marginBottom: 2 }}>
             {t.kind === "success" ? "✓ " : t.kind === "error" ? "✕ " : "· "}{t.kind.charAt(0).toUpperCase() + t.kind.slice(1)}
           </div>
-          <div style={{ fontSize: 13, color: c.textDim, lineHeight: 1.4 }}>{t.msg}</div>
+          <div style={{ fontSize: 12, color: c.textDim, lineHeight: 1.4 }}>{t.msg}</div>
         </div>
       ))}
     </div>
@@ -925,17 +929,16 @@ export default function ClauseGuardApp() {
     if (!window.ethereum) { toast("No wallet detected. Install Rabby or MetaMask.", "error"); return; }
     try {
       setWalletLoading(true);
-      // wallet_requestPermissions forces the account picker to appear even if
-      // the site already has a prior approval — lets the user switch accounts.
+      // wallet_requestPermissions forces the account picker in MetaMask.
+      // Rabby ignores it and auto-connects — that's a Rabby limitation.
       try {
         await window.ethereum.request({
           method: "wallet_requestPermissions",
           params: [{ eth_accounts: {} }],
         });
       } catch (permErr) {
-        // User cancelled the picker — don't proceed
-        if (permErr.code === 4001) throw permErr;
-        // Some wallets don't support wallet_requestPermissions — fall through
+        if (permErr.code === 4001) throw permErr; // user explicitly cancelled
+        // wallet doesn't support this method — fall through to eth_requestAccounts
       }
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       if (!accounts.length) throw new Error("No accounts returned");
@@ -952,8 +955,10 @@ export default function ClauseGuardApp() {
   function disconnectWallet() {
     setWalletAddress(null);
     setProvider(null);
-    toast("Wallet disconnected", "info");
+    setShowSwitchHint(true);
   }
+
+  const [showSwitchHint, setShowSwitchHint] = useState(false);
 
   useEffect(() => {
     if (!window.ethereum) return;
@@ -1003,6 +1008,19 @@ export default function ClauseGuardApp() {
         onCreate={() => walletAddress ? setShowCreate(true) : connectWallet()}
         onRefresh={loadDeals}
       />
+
+      {/* Switch account hint — shown after disconnect, for Rabby users */}
+      {showSwitchHint && !walletAddress && (
+        <div style={{ background: `${c.accent}14`, borderBottom: `1px solid ${c.border}`, padding: "11px 28px", display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 13, color: c.textDim, flex: 1 }}>
+            <span style={{ color: c.accent2, fontWeight: 600 }}>To switch accounts</span> — open your wallet extension and change the active account there first, then connect here.
+          </span>
+          <button onClick={() => { setShowSwitchHint(false); connectWallet(); }} style={{ background: `linear-gradient(135deg, ${c.accent2}, ${c.accent})`, color: "#fff", border: "none", borderRadius: 99, padding: "7px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}>
+            Connect wallet
+          </button>
+          <button onClick={() => setShowSwitchHint(false)} style={{ background: "transparent", border: "none", color: c.textMute, cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "0 4px" }}>×</button>
+        </div>
+      )}
 
       <Hero c={c} dark={dark} deals={deals} onCreateClick={() => setShowCreate(true)} onConnectClick={connectWallet} walletAddress={walletAddress} />
 
