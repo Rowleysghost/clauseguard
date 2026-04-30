@@ -556,6 +556,7 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
   const [price, setPrice] = useState("");
   const [deadline, setDeadline] = useState("");
   const [urls, setUrls] = useState("");
+  const [minSources, setMinSources] = useState(1);
   const [loading, setLoading] = useState(false);
 
   const inp = { background: c.bg, border: `1px solid ${c.border}`, borderRadius: 10, padding: "11px 14px", color: c.text, fontSize: 14, width: "100%", outline: "none", transition: "border-color 200ms", fontFamily: "inherit" };
@@ -572,6 +573,7 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
         priceDescription: price.trim(),
         deadlineDescription: deadline.trim(),
         verificationUrls: urlArray,
+        minSourcesRequired: minSources,
       });
       toast("Deal created on-chain", "success");
       onSuccess();
@@ -614,6 +616,22 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
           <label style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600, display: "block", marginBottom: 8 }}>Verification URLs <span style={{ color: c.textMute, fontWeight: 400 }}>(comma-separated — validators crawl these)</span></label>
           <input value={urls} onChange={(e) => setUrls(e.target.value)} placeholder="https://track.dhl.com/123, https://yoursite.com/order/456" style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
         </div>
+
+        <div>
+          <label style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600, display: "block", marginBottom: 8 }}>
+            Min. verification sources <span style={{ color: c.textMute, fontWeight: 400, textTransform: "none" }}>(multi-sig: require {minSources} independent source{minSources > 1 ? "s" : ""})</span>
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            {[1, 2, 3].map((n) => (
+              <button key={n} onClick={() => setMinSources(n)} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: `1px solid ${minSources === n ? c.accent : c.border}`, background: minSources === n ? `${c.accent}22` : c.bg, color: minSources === n ? c.accent : c.textDim, fontWeight: 700, fontSize: 15, cursor: "pointer", transition: "all 160ms" }}>
+                {n}
+              </button>
+            ))}
+          </div>
+          <div style={{ marginTop: 6, fontSize: 11, color: c.textMute }}>
+            {minSources === 1 ? "Standard — any evidence that satisfies the terms" : `Multi-sig — AI must find confirmation from at least ${minSources} distinct sources`}
+          </div>
+        </div>
       </div>
 
       <div style={{ padding: "18px 32px 28px", display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: `1px solid ${c.border}`, gap: 12 }}>
@@ -632,6 +650,8 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
 // ── Deal detail dialog ────────────────────────────────────────
 function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh, toast }) {
   const [showEvidenceForm, setShowEvidenceForm] = useState(false);
+  const [showCounterForm, setShowCounterForm] = useState(false);
+  const [counterTermsInput, setCounterTermsInput] = useState("");
   const [fundAmt, setFundAmt] = useState("");
   const [txMsg, setTxMsg] = useState(null);
 
@@ -726,7 +746,7 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
               <EvidenceForm deal={deal} walletAddress={walletAddress} provider={provider} c={c} toast={toast} onSuccess={async () => { setShowEvidenceForm(false); onRefresh(); }} onCancel={() => setShowEvidenceForm(false)} />
             </div>
           ) : (
-            isParty && ["funded", "evidence_submitted", "open"].includes(status) && walletAddress && (
+            isParty && ["funded", "evidence_submitted", "open", "disputed"].includes(status) && walletAddress && (
               <Btn kind="ghost" c={c} icon="upload" style={{ marginTop: 12 }} onClick={() => setShowEvidenceForm(true)}>Attach evidence</Btn>
             )
           )}
@@ -767,6 +787,19 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
             </div>
           )}
 
+          {/* Dispute escalation */}
+          {status === "disputed" && isParty && (
+            <div style={{ padding: "14px 16px", borderRadius: 12, border: `1px solid rgba(255,181,71,0.35)`, background: "rgba(255,181,71,0.06)", marginBottom: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: c.warn, marginBottom: 6 }}>Validators in disagreement</div>
+              <div style={{ fontSize: 12, color: c.textDim, lineHeight: 1.55, marginBottom: 12 }}>
+                Submit additional evidence using the panel on the left, then re-request verification to resolve the dispute.
+              </div>
+              <Btn kind="primary" c={c} icon="spark" onClick={() => tx("Re-requesting verification…", () => GL.requestVerification(walletAddress, provider, parseInt(deal.id)))}>
+                Re-request Verification
+              </Btn>
+            </div>
+          )}
+
           {/* Fund form */}
           {status === "open" && !isSeller && walletAddress && (
             <div style={{ marginBottom: 14 }}>
@@ -782,6 +815,70 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
             </div>
           )}
 
+          {/* Counter-terms: seller sees pending proposal */}
+          {deal.pending_terms && isSeller && (
+            <div style={{ padding: "14px 16px", borderRadius: 12, border: `1px solid rgba(255,181,71,0.35)`, background: "rgba(255,181,71,0.06)", marginBottom: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: c.warn, marginBottom: 6 }}>Amendment Proposed</div>
+              <p style={{ fontSize: 12, color: c.textDim, lineHeight: 1.55, fontStyle: "italic", borderLeft: `2px solid rgba(255,181,71,0.5)`, paddingLeft: 10, marginBottom: 8 }}>
+                "{deal.pending_terms}"
+              </p>
+              <div style={{ fontSize: 11, color: c.textMute, marginBottom: 12 }}>
+                From: <span style={{ fontFamily: "ui-monospace, monospace" }}>{shortAddr(deal.pending_terms_from)}</span>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Btn kind="success" c={c} size="sm" icon="check" style={{ flex: 1 }} onClick={() => tx("Accepting counter-terms…", () => GL.acceptCounterTerms(walletAddress, provider, parseInt(deal.id)))}>Accept</Btn>
+                <Btn kind="danger" c={c} size="sm" icon="x" style={{ flex: 1 }} onClick={() => tx("Rejecting counter-terms…", () => GL.rejectCounterTerms(walletAddress, provider, parseInt(deal.id)))}>Reject</Btn>
+              </div>
+            </div>
+          )}
+
+          {/* Counter-terms: proposer sees awaiting message */}
+          {deal.pending_terms && !isSeller && walletAddress?.toLowerCase() === deal.pending_terms_from?.toLowerCase() && (
+            <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${c.accent}33`, background: `${c.accent}08`, marginBottom: 14, fontSize: 12, color: c.textDim }}>
+              <span style={{ color: c.accent, fontWeight: 600 }}>Your counter-terms are pending seller review.</span>
+            </div>
+          )}
+
+          {/* Counter-terms: propose button (non-seller, open/funded, no pending) */}
+          {!deal.pending_terms && !isSeller && ["open", "funded"].includes(status) && walletAddress && !showCounterForm && (
+            <Btn kind="ghost" c={c} size="sm" style={{ width: "100%", marginBottom: 10 }} onClick={() => setShowCounterForm(true)}>
+              Propose Counter-terms
+            </Btn>
+          )}
+
+          {/* Counter-terms: proposal form */}
+          {showCounterForm && (
+            <div style={{ marginBottom: 14, padding: 14, background: c.surface, border: `1px solid ${c.border}`, borderRadius: 12 }}>
+              <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600, marginBottom: 8 }}>Your Counter-terms</div>
+              <textarea
+                value={counterTermsInput}
+                onChange={(e) => setCounterTermsInput(e.target.value)}
+                placeholder="Propose modified deal terms…"
+                rows={4}
+                style={{ background: c.bg, border: `1px solid ${c.border}`, borderRadius: 10, padding: "10px 14px", color: c.text, fontSize: 13, width: "100%", outline: "none", fontFamily: "inherit", resize: "vertical", transition: "border-color 200ms" }}
+                onFocus={(e) => (e.target.style.borderColor = c.borderHi)}
+                onBlur={(e) => (e.target.style.borderColor = c.border)}
+              />
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <Btn kind="ghost" c={c} size="sm" style={{ flex: 1 }} onClick={() => { setShowCounterForm(false); setCounterTermsInput(""); }}>Cancel</Btn>
+                <Btn kind="primary" c={c} size="sm" style={{ flex: 2 }} disabled={!counterTermsInput.trim()} onClick={() => {
+                  if (!counterTermsInput.trim()) { toast("Enter your proposed terms", "error"); return; }
+                  tx("Proposing counter-terms…", () => GL.proposeCounterTerms(walletAddress, provider, parseInt(deal.id), counterTermsInput.trim()));
+                  setShowCounterForm(false);
+                  setCounterTermsInput("");
+                }}>Submit Proposal</Btn>
+              </div>
+            </div>
+          )}
+
+          {/* Multi-sig source badge */}
+          {deal.min_sources_required && parseInt(deal.min_sources_required) > 1 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 10, border: `1px solid ${c.accent}33`, background: `${c.accent}08`, marginBottom: 14, fontSize: 12, color: c.textDim }}>
+              <Icon name="shield" size={13} color={c.accent} />
+              Multi-sig: requires evidence from <span style={{ color: c.accent, fontWeight: 700, marginInline: 3 }}>{deal.min_sources_required}</span> independent sources
+            </div>
+          )}
+
           {/* Action buttons */}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {status === "evidence_submitted" && isSeller && (
@@ -789,6 +886,14 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
                 Request AI Verification
               </Btn>
             )}
+
+            {/* Deadline check */}
+            {["funded", "evidence_submitted"].includes(status) && isParty && (
+              <Btn kind="ghost" c={c} size="sm" onClick={() => tx("Checking deadline…", () => GL.checkDeadline(walletAddress, provider, parseInt(deal.id)))}>
+                Check Deadline
+              </Btn>
+            )}
+
             {status === "verified" && isParty && (
               <Btn kind="success" c={c} icon="check" onClick={() => tx("Settling deal…", () => GL.settleDeal(walletAddress, provider, parseInt(deal.id)))}>
                 Settle & Release Funds
@@ -919,6 +1024,7 @@ export default function ClauseGuardApp() {
   const [dealsError, setDealsError] = useState(null);
 
   const [tab, setTab] = useState("all");
+  const [search, setSearch] = useState("");
   const [openDeal, setOpenDeal] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
 
@@ -989,9 +1095,19 @@ export default function ClauseGuardApp() {
 
   // ── Filter deals ────────────────────────────────────────────
   const filteredDeals = deals.filter((d) => {
-    if (tab === "mine") return walletAddress && (d.seller?.toLowerCase() === walletAddress.toLowerCase() || d.buyer?.toLowerCase() === walletAddress.toLowerCase());
-    if (tab === "open") return d.status === "open";
-    return true;
+    const tabMatch =
+      tab === "mine" ? walletAddress && (d.seller?.toLowerCase() === walletAddress.toLowerCase() || d.buyer?.toLowerCase() === walletAddress.toLowerCase())
+      : tab === "open" ? d.status === "open"
+      : true;
+    if (!tabMatch) return false;
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return (
+      d.terms?.toLowerCase().includes(q) ||
+      d.price_description?.toLowerCase().includes(q) ||
+      d.seller?.toLowerCase().includes(q) ||
+      String(d.id) === q.replace("#", "")
+    );
   });
 
   return (
@@ -1034,6 +1150,15 @@ export default function ClauseGuardApp() {
             </h2>
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              type="search"
+              placeholder="Search deals…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              style={{ background: c.surface, border: `1px solid ${c.border}`, borderRadius: 99, padding: "8px 16px", color: c.text, fontSize: 13, outline: "none", width: 200, fontFamily: "inherit", transition: "border-color 200ms" }}
+              onFocus={(e) => (e.target.style.borderColor = c.borderHi)}
+              onBlur={(e) => (e.target.style.borderColor = c.border)}
+            />
             <SegmentedControl c={c} options={[["all", "All"], ["open", "Open"], ["mine", "Mine"]]} value={tab} onChange={setTab} />
           </div>
         </div>

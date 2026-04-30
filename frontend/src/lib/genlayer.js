@@ -51,10 +51,15 @@ export async function fetchDealCount() {
   const { readClient } = await getClients();
   return await readClient.readContract({ address: CONTRACT_ADDRESS, functionName: "get_deal_count", args: [], stateStatus: "accepted" });
 }
-export async function createDeal(walletAddress, provider, { terms, priceDescription, deadlineDescription, verificationUrls }) {
+export async function createDeal(walletAddress, provider, { terms, priceDescription, deadlineDescription, verificationUrls, minSourcesRequired = 1 }) {
   const { writeClient } = await getClients(walletAddress, provider);
   if (!writeClient) throw new Error("Wallet not connected");
-  const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "create_deal", args: [terms, priceDescription, deadlineDescription, verificationUrls.join(",")], value: 0n });
+  const hash = await writeClient.writeContract({
+    address: CONTRACT_ADDRESS,
+    functionName: "create_deal",
+    args: [terms, priceDescription, deadlineDescription, verificationUrls.join(","), minSourcesRequired],
+    value: 0n,
+  });
   return await waitForTx(writeClient, hash);
 }
 export async function fundDeal(walletAddress, provider, dealId, amountWei) {
@@ -91,5 +96,29 @@ export async function cancelDeal(walletAddress, provider, dealId) {
   const { writeClient } = await getClients(walletAddress, provider);
   if (!writeClient) throw new Error("Wallet not connected");
   const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "cancel_deal", args: [dealId], value: 0n });
+  return await waitForTx(writeClient, hash);
+}
+export async function proposeCounterTerms(walletAddress, provider, dealId, newTerms) {
+  const { writeClient } = await getClients(walletAddress, provider);
+  if (!writeClient) throw new Error("Wallet not connected");
+  const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "propose_counter_terms", args: [dealId, newTerms], value: 0n });
+  return await waitForTx(writeClient, hash);
+}
+export async function acceptCounterTerms(walletAddress, provider, dealId) {
+  const { writeClient } = await getClients(walletAddress, provider);
+  if (!writeClient) throw new Error("Wallet not connected");
+  const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "accept_counter_terms", args: [dealId], value: 0n });
+  return await waitForTx(writeClient, hash);
+}
+export async function rejectCounterTerms(walletAddress, provider, dealId) {
+  const { writeClient } = await getClients(walletAddress, provider);
+  if (!writeClient) throw new Error("Wallet not connected");
+  const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "reject_counter_terms", args: [dealId], value: 0n });
+  return await waitForTx(writeClient, hash);
+}
+export async function checkDeadline(walletAddress, provider, dealId) {
+  const { writeClient } = await getClients(walletAddress, provider);
+  if (!writeClient) throw new Error("Wallet not connected");
+  const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "check_deadline", args: [dealId], value: 0n });
   return await waitForTx(writeClient, hash);
 }

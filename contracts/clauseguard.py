@@ -33,24 +33,26 @@ class ClauseGuard(gl.Contract):
         price_description: str,
         deadline_description: str,
         verification_urls: str,
+        min_sources_required: u256,
     ) -> u256:
         """
         Seller creates a new deal with natural language terms.
 
         Args:
             terms: Plain English description of the deal conditions
-                   e.g. "Deliver 500 units of Product X via FedEx. Buyer
-                   confirms receipt and quality within 7 days."
             price_description: Price in human-readable form (stored as metadata)
             deadline_description: Deadline in human-readable form
             verification_urls: Comma-separated URLs for evidence verification
-                               e.g. tracking pages, inspection portals
+            min_sources_required: Minimum number of distinct sources that must
+                                  confirm the conditions (1 = standard, 2-3 = multi-sig)
 
         Returns:
             The new deal ID
         """
         self.deal_count += u256(1)
         deal_id = self.deal_count
+
+        min_src = max(1, int(min_sources_required))
 
         deal = {
             "id": str(deal_id),
@@ -60,12 +62,15 @@ class ClauseGuard(gl.Contract):
             "price_description": price_description,
             "deadline_description": deadline_description,
             "verification_urls": verification_urls,
-            "status": "open",           # open -> funded -> evidence_submitted -> verified -> settled / refunded / disputed
-            "evidence": "[]",           # JSON array of evidence entries
-            "verdict": "",              # AI verdict after verification
-            "verdict_details": "",      # Detailed reasoning from validators
-            "created_at": "",           # Would use block timestamp in production
+            "status": "open",
+            "evidence": "[]",
+            "verdict": "",
+            "verdict_details": "",
+            "created_at": "",
             "funded_amount": "0",
+            "min_sources_required": str(min_src),
+            "pending_terms": "",
+            "pending_terms_from": "",
         }
 
         self.deals[deal_id] = json.dumps(deal)
@@ -102,12 +107,12 @@ class ClauseGuard(gl.Contract):
         Args:
             deal_id: The deal to submit evidence for
             evidence_type: "delivery_proof", "quality_report", "tracking", "receipt", "other"
-            evidence_url: URL pointing to the evidence (tracking page, document, etc.)
+            evidence_url: URL pointing to the evidence
             description: Plain English description of what this evidence shows
         """
         deal = self._get_deal(deal_id)
 
-        if deal["status"] not in ("funded", "evidence_submitted"):
+        if deal["status"] not in ("funded", "evidence_submitted", "disputed"):
             gl.rollback("Deal must be funded before evidence can be submitted")
 
         sender = str(gl.message.sender)
@@ -123,13 +128,15 @@ class ClauseGuard(gl.Contract):
         })
 
         deal["evidence"] = json.dumps(evidence_list)
-        deal["status"] = "evidence_submitted"
+        if deal["status"] != "disputed":
+            deal["status"] = "evidence_submitted"
         self.deals[deal_id] = json.dumps(deal)
 
     @gl.public.write
     def request_verification(self, deal_id: u256):
         """
         Either party requests AI verification of the deal conditions.
+        Can also be called from 'disputed' status to re-request verification.
 
         This is the core intelligent contract method. Validators will:
         1. Fetch all evidence URLs and verification URLs
@@ -142,7 +149,7 @@ class ClauseGuard(gl.Contract):
         """
         deal = self._get_deal(deal_id)
 
-        if deal["status"] != "evidence_submitted":
+        if deal["status"] not in ("evidence_submitted", "disputed"):
             gl.rollback("Evidence must be submitted before verification")
 
         sender = str(gl.message.sender)
@@ -155,6 +162,9 @@ class ClauseGuard(gl.Contract):
         verification_urls = [u.strip() for u in deal["verification_urls"].split(",") if u.strip()]
         all_urls = list(set(evidence_urls + verification_urls))
 
+        min_sources = int(deal.get("min_sources_required", "1"))
+        is_redispatch = deal["status"] == "disputed"
+
         # ── AI VERIFICATION via Equivalence Principle ──
         def verify_conditions():
             # Step 1: Fetch web evidence from all provided URLs
@@ -164,7 +174,7 @@ class ClauseGuard(gl.Contract):
                     page_content = gl.nondet.web.render(url, mode="text")
                     web_evidence.append({
                         "url": url,
-                        "content": page_content[:3000]  # Limit content length
+                        "content": page_content[:3000]
                     })
                 except Exception:
                     web_evidence.append({
@@ -187,6 +197,14 @@ class ClauseGuard(gl.Contract):
             for we in web_evidence:
                 web_evidence_summary += f"\n--- Content from {we['url']} ---\n{we['content']}\n"
 
+            multi_source_note = ""
+            if min_sources > 1:
+                multi_source_note = f"\n\nMULTI-SOURCE REQUIREMENT: This deal requires confirmation from at least {min_sources} distinct and independent verification sources. Count the number of independent sources (different domains/platforms) that clearly confirm the conditions. If fewer than {min_sources} independent sources confirm the conditions, return conditions_met: false and note 'insufficient_independent_sources' in unmet_conditions."
+
+            redispatch_note = ""
+            if is_redispatch:
+                redispatch_note = "\n\nNOTE: This is a re-verification request following a previous disputed verdict. Apply the same rigorous standard."
+
             # Step 3: Ask the LLM to assess whether conditions are met
             prompt = f"""You are an impartial escrow judge for a P2P trade deal on the ClauseGuard protocol.
 
@@ -207,7 +225,7 @@ Carefully analyze whether the deal terms have been FULLY satisfied based on the
 evidence provided. Consider:
 1. Does the evidence directly address each condition in the deal terms?
 2. Is the web content consistent with the claims made in the evidence?
-3. Are there any conditions that remain unverified or contradicted?
+3. Are there any conditions that remain unverified or contradicted?{multi_source_note}{redispatch_note}
 
 You MUST respond with ONLY a valid JSON object in this exact format:
 {{
@@ -225,7 +243,6 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
             # Parse and normalize for consensus
             try:
                 parsed = json.loads(result)
-                # Normalize to ensure consistent structure for consensus
                 normalized = {
                     "conditions_met": bool(parsed.get("conditions_met", False)),
                     "confidence": str(parsed.get("confidence", "low")),
@@ -258,6 +275,152 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
                 deal["status"] = "rejected"
 
         self.deals[deal_id] = json.dumps(deal)
+
+    @gl.public.write
+    def propose_counter_terms(self, deal_id: u256, new_terms: str):
+        """
+        A potential buyer (or the existing buyer) proposes amended deal terms.
+        The seller can then accept (updating the terms) or reject.
+
+        Args:
+            deal_id: The deal to amend
+            new_terms: The proposed replacement terms
+        """
+        deal = self._get_deal(deal_id)
+
+        if deal["status"] not in ("open", "funded"):
+            gl.rollback("Counter-terms can only be proposed for open or funded deals")
+
+        sender = str(gl.message.sender)
+        if sender == deal["seller"]:
+            gl.rollback("Seller cannot propose counter-terms to their own deal")
+
+        if deal["status"] == "funded" and sender != deal["buyer"]:
+            gl.rollback("Only the buyer can propose counter-terms for a funded deal")
+
+        if not new_terms.strip():
+            gl.rollback("Counter-terms cannot be empty")
+
+        deal["pending_terms"] = new_terms.strip()
+        deal["pending_terms_from"] = sender
+        self.deals[deal_id] = json.dumps(deal)
+
+    @gl.public.write
+    def accept_counter_terms(self, deal_id: u256):
+        """
+        Seller accepts the pending counter-terms, updating the deal's terms.
+        """
+        deal = self._get_deal(deal_id)
+
+        if not deal.get("pending_terms", ""):
+            gl.rollback("No pending counter-terms to accept")
+
+        sender = str(gl.message.sender)
+        if sender != deal["seller"]:
+            gl.rollback("Only the seller can accept counter-terms")
+
+        deal["terms"] = deal["pending_terms"]
+        deal["pending_terms"] = ""
+        deal["pending_terms_from"] = ""
+        self.deals[deal_id] = json.dumps(deal)
+
+    @gl.public.write
+    def reject_counter_terms(self, deal_id: u256):
+        """
+        Seller rejects the pending counter-terms. Terms revert to the original.
+        """
+        deal = self._get_deal(deal_id)
+
+        if not deal.get("pending_terms", ""):
+            gl.rollback("No pending counter-terms to reject")
+
+        sender = str(gl.message.sender)
+        if sender != deal["seller"]:
+            gl.rollback("Only the seller can reject counter-terms")
+
+        deal["pending_terms"] = ""
+        deal["pending_terms_from"] = ""
+        self.deals[deal_id] = json.dumps(deal)
+
+    @gl.public.write
+    def check_deadline(self, deal_id: u256):
+        """
+        AI-powered deadline check. Fetches the current UTC time from a live
+        source and determines whether the deal's deadline has passed.
+        If expired, the deal is moved to 'rejected' so the buyer can claim a refund.
+
+        Only callable by deal parties, only for funded/evidence_submitted deals.
+        """
+        deal = self._get_deal(deal_id)
+
+        if deal["status"] not in ("funded", "evidence_submitted"):
+            gl.rollback("Deadline can only be checked for funded deals")
+
+        sender = str(gl.message.sender)
+        if sender != deal["seller"] and sender != deal["buyer"]:
+            gl.rollback("Only deal parties can check the deadline")
+
+        deadline_desc = deal["deadline_description"]
+
+        def check():
+            current_time = ""
+            try:
+                time_data = gl.nondet.web.render(
+                    "https://worldtimeapi.org/api/timezone/UTC", mode="text"
+                )
+                current_time = time_data[:600]
+            except Exception:
+                current_time = "[Could not fetch current time]"
+
+            prompt = f"""You are checking whether a P2P escrow deal deadline has passed.
+
+CURRENT UTC TIME DATA (fetched live from worldtimeapi.org):
+{current_time}
+
+DEAL DEADLINE DESCRIPTION: "{deadline_desc}"
+
+Has this deadline passed as of the current time shown above?
+
+Rules:
+- Extract the exact current date from the time data above.
+- If the deadline is relative (e.g. "7 days from funding") and you cannot determine
+  an absolute date, respond with deadline_passed: false.
+- If the time data could not be fetched, respond with deadline_passed: false.
+- Only respond with deadline_passed: true if you are HIGHLY CONFIDENT the deadline
+  has passed based on the fetched current time.
+
+Respond with ONLY a valid JSON object:
+{{
+    "deadline_passed": true or false,
+    "reasoning": "1-2 sentence explanation referencing the current date and deadline"
+}}"""
+
+            result = gl.nondet.exec_prompt(prompt)
+            try:
+                parsed = json.loads(result)
+                return json.dumps({
+                    "deadline_passed": bool(parsed.get("deadline_passed", False)),
+                    "reasoning": str(parsed.get("reasoning", ""))
+                }, sort_keys=True)
+            except (json.JSONDecodeError, KeyError):
+                return json.dumps({
+                    "deadline_passed": False,
+                    "reasoning": "Failed to parse deadline check result"
+                }, sort_keys=True)
+
+        result_json = gl.eq_principle.strict_eq(check)
+        result = json.loads(result_json)
+
+        if result["deadline_passed"]:
+            deal["status"] = "rejected"
+            deal["verdict"] = "rejected"
+            deal["verdict_details"] = json.dumps({
+                "conditions_met": False,
+                "confidence": "high",
+                "reasoning": "Deadline expired. " + result.get("reasoning", ""),
+                "unmet_conditions": ["deadline_passed"]
+            })
+            self.deals[deal_id] = json.dumps(deal)
 
     @gl.public.write
     def settle_deal(self, deal_id: u256):
