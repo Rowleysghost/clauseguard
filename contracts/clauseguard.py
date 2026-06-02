@@ -4,6 +4,25 @@ from genlayer import *
 import json
 
 
+# ── Bounds ─────────────────────────────────────────────
+# Every loop in this contract is gated by one of these limits. Keep them
+# conservative — they are the only thing standing between a hostile caller
+# and an LLM-prompt or storage explosion.
+MAX_EVIDENCE_ITEMS = 50
+MAX_URLS_PER_VERIFICATION = 10
+MAX_VERIFICATION_URLS_AT_CREATE = 5
+MAX_TERMS_LEN = 4000
+MAX_PRICE_LEN = 200
+MAX_DEADLINE_LEN = 200
+MAX_DESCRIPTION_LEN = 500
+MAX_URL_LEN = 500
+MAX_PAGE_CONTENT_LEN = 3000
+MAX_WEB_SUMMARY_LEN = 50_000
+MAX_VERIFICATION_ATTEMPTS = 3
+MAX_DEALS_PER_USER = 500
+MAX_PAGE_SIZE = 100
+
+
 class ClauseGuard(gl.Contract):
     """
     ClauseGuard: AI-Powered P2P Trade Escrow with Natural Language Terms
@@ -52,6 +71,32 @@ class ClauseGuard(gl.Contract):
         self.deal_count += u256(1)
         deal_id = self.deal_count
 
+        if not terms.strip():
+            gl.rollback("Terms cannot be empty")
+        if len(terms) > MAX_TERMS_LEN:
+            gl.rollback("Terms too long")
+        if not price_description.strip():
+            gl.rollback("Price description cannot be empty")
+        if len(price_description) > MAX_PRICE_LEN:
+            gl.rollback("Price description too long")
+        if not deadline_description.strip():
+            gl.rollback("Deadline description cannot be empty")
+        if len(deadline_description) > MAX_DEADLINE_LEN:
+            gl.rollback("Deadline description too long")
+
+        # Cap the raw string before splitting — otherwise a megabyte of commas
+        # would expand into a huge list before the count check below.
+        if len(verification_urls) > MAX_VERIFICATION_URLS_AT_CREATE * (MAX_URL_LEN + 1):
+            gl.rollback("Verification URLs blob too large")
+
+        # Validate verification_urls — comma-separated, capped count and length.
+        url_list = [u.strip() for u in verification_urls.split(",") if u.strip()]
+        if len(url_list) > MAX_VERIFICATION_URLS_AT_CREATE:
+            gl.rollback("Too many verification URLs")
+        for u in url_list:
+            if len(u) > MAX_URL_LEN:
+                gl.rollback("Verification URL too long")
+
         min_src = max(1, int(min_sources_required))
 
         deal = {
@@ -71,6 +116,7 @@ class ClauseGuard(gl.Contract):
             "min_sources_required": str(min_src),
             "pending_terms": "",
             "pending_terms_from": "",
+            "verification_attempts": "0",
         }
 
         self.deals[deal_id] = json.dumps(deal)
@@ -92,9 +138,19 @@ class ClauseGuard(gl.Contract):
         if str(gl.message.sender) == deal["seller"]:
             gl.rollback("Seller cannot fund their own deal")
 
+        # Reject zero-value funding — a 0-wei buyer would block the buyer slot
+        # without locking value, griefing the seller.
+        if int(gl.message.value) <= 0:
+            gl.rollback("Fund amount must be positive")
+
         deal["buyer"] = str(gl.message.sender)
         deal["status"] = "funded"
         deal["funded_amount"] = str(gl.message.value)
+
+        # Funding invalidates any pending counter-terms proposed before a buyer
+        # existed — otherwise an attacker could pre-stage hostile terms.
+        deal["pending_terms"] = ""
+        deal["pending_terms_from"] = ""
 
         self.deals[deal_id] = json.dumps(deal)
         self._add_user_deal(gl.message.sender, deal_id)
@@ -119,7 +175,18 @@ class ClauseGuard(gl.Contract):
         if sender != deal["seller"] and sender != deal["buyer"]:
             gl.rollback("Only deal parties can submit evidence")
 
+        if not evidence_type.strip() or not evidence_url.strip() or not description.strip():
+            gl.rollback("Evidence fields cannot be empty")
+        if len(evidence_type) > MAX_DESCRIPTION_LEN:
+            gl.rollback("Evidence type too long")
+        if len(evidence_url) > MAX_URL_LEN:
+            gl.rollback("Evidence URL too long")
+        if len(description) > MAX_DESCRIPTION_LEN:
+            gl.rollback("Description too long")
+
         evidence_list = json.loads(deal["evidence"])
+        if len(evidence_list) >= MAX_EVIDENCE_ITEMS:
+            gl.rollback("Maximum evidence items reached for this deal")
         evidence_list.append({
             "submitted_by": sender,
             "type": evidence_type,
@@ -156,11 +223,21 @@ class ClauseGuard(gl.Contract):
         if sender != deal["seller"] and sender != deal["buyer"]:
             gl.rollback("Only deal parties can request verification")
 
+        # Cap re-verification attempts so a disputed deal cannot loop forever.
+        attempts = int(deal.get("verification_attempts", "0")) + 1
+        if attempts > MAX_VERIFICATION_ATTEMPTS:
+            gl.rollback("Maximum verification attempts reached — escalate dispute off-chain")
+        deal["verification_attempts"] = str(attempts)
+
         # Collect all URLs to check
         evidence_list = json.loads(deal["evidence"])
         evidence_urls = [e["url"] for e in evidence_list]
         verification_urls = [u.strip() for u in deal["verification_urls"].split(",") if u.strip()]
         all_urls = list(set(evidence_urls + verification_urls))
+        # Cap total URL count — each entry triggers a web crawl during
+        # gl.eq_principle.strict_eq and is the dominant compute cost.
+        if len(all_urls) > MAX_URLS_PER_VERIFICATION:
+            gl.rollback("Too many URLs for one verification — reduce evidence count")
 
         min_sources = int(deal.get("min_sources_required", "1"))
         is_redispatch = deal["status"] == "disputed"
@@ -174,7 +251,7 @@ class ClauseGuard(gl.Contract):
                     page_content = gl.nondet.web.render(url, mode="text")
                     web_evidence.append({
                         "url": url,
-                        "content": page_content[:3000]
+                        "content": page_content[:MAX_PAGE_CONTENT_LEN]
                     })
                 except Exception:
                     web_evidence.append({
@@ -193,9 +270,16 @@ class ClauseGuard(gl.Contract):
 
             evidence_summary = "\n".join(evidence_descriptions)
 
+            # Cap total web summary length so a few large pages can't blow
+            # past the LLM context window. Per-page is already capped above;
+            # this guards the total across all crawled URLs.
             web_evidence_summary = ""
             for we in web_evidence:
-                web_evidence_summary += f"\n--- Content from {we['url']} ---\n{we['content']}\n"
+                chunk = f"\n--- Content from {we['url']} ---\n{we['content']}\n"
+                if len(web_evidence_summary) + len(chunk) > MAX_WEB_SUMMARY_LEN:
+                    web_evidence_summary += "\n[Web evidence truncated — total size exceeded]\n"
+                    break
+                web_evidence_summary += chunk
 
             multi_source_note = ""
             if min_sources > 1:
@@ -300,6 +384,18 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
 
         if not new_terms.strip():
             gl.rollback("Counter-terms cannot be empty")
+        if len(new_terms) > MAX_TERMS_LEN:
+            gl.rollback("Counter-terms too long")
+
+        # On an open deal, only one pending proposal at a time. The first
+        # would-be buyer claims the slot; otherwise a hostile non-party could
+        # repeatedly overwrite a real buyer's offer (and pre-stage terms a
+        # later seller could accept after a different buyer funds — the
+        # counter-terms hijack).
+        if deal["status"] == "open":
+            existing_from = deal.get("pending_terms_from", "")
+            if existing_from and existing_from != sender:
+                gl.rollback("Another party has a pending counter-terms proposal")
 
         deal["pending_terms"] = new_terms.strip()
         deal["pending_terms_from"] = sender
@@ -318,6 +414,18 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         sender = str(gl.message.sender)
         if sender != deal["seller"]:
             gl.rollback("Only the seller can accept counter-terms")
+
+        # Counter-terms can only be accepted while the deal is still in a
+        # negotiable state. Without this the seller could accept stale
+        # proposals after evidence/verification, rewriting terms retroactively.
+        if deal["status"] not in ("open", "funded"):
+            gl.rollback("Counter-terms can only be accepted for open or funded deals")
+
+        # If a buyer has funded, the proposal must come from that buyer —
+        # otherwise the seller could bind the buyer's locked funds to terms
+        # proposed by a third party (the counter-terms hijack).
+        if deal["status"] == "funded" and deal.get("pending_terms_from", "") != deal["buyer"]:
+            gl.rollback("Pending counter-terms were not proposed by the current buyer")
 
         deal["terms"] = deal["pending_terms"]
         deal["pending_terms"] = ""
@@ -433,6 +541,10 @@ Respond with ONLY a valid JSON object:
         if deal["status"] != "verified":
             gl.rollback("Deal must be verified before settlement")
 
+        sender = str(gl.message.sender)
+        if sender != deal["seller"] and sender != deal["buyer"]:
+            gl.rollback("Only deal parties can settle")
+
         # In production: transfer escrowed funds to seller
         # gl.transfer(Address(deal["seller"]), u256(int(deal["funded_amount"])))
 
@@ -511,29 +623,21 @@ Respond with ONLY a valid JSON object:
             return "[]"
 
     @gl.public.view
-    def get_open_deals(self) -> str:
-        """Returns JSON array of all open deals (marketplace view)."""
-        open_deals = []
-        for i in range(1, int(self.deal_count) + 1):
-            try:
-                deal = json.loads(self.deals[u256(i)])
-                if deal["status"] == "open":
-                    open_deals.append(deal)
-            except (KeyError, json.JSONDecodeError):
-                continue
-        return json.dumps(open_deals)
+    def get_open_deals(self, offset: u256, limit: u256) -> str:
+        """
+        Returns a JSON array of up to `limit` open deals starting at deal
+        id `offset + 1`. Paginated to avoid O(N) scans of the entire deals
+        map; callers should loop until an empty/short page is returned.
+        """
+        return self._scan_deals(int(offset), int(limit), status_filter="open")
 
     @gl.public.view
-    def get_all_deals(self) -> str:
-        """Returns JSON array of all deals (for dashboard)."""
-        all_deals = []
-        for i in range(1, int(self.deal_count) + 1):
-            try:
-                deal = json.loads(self.deals[u256(i)])
-                all_deals.append(deal)
-            except (KeyError, json.JSONDecodeError):
-                continue
-        return json.dumps(all_deals)
+    def get_all_deals(self, offset: u256, limit: u256) -> str:
+        """
+        Returns a JSON array of up to `limit` deals starting at id
+        `offset + 1`. Paginated — see get_open_deals.
+        """
+        return self._scan_deals(int(offset), int(limit), status_filter=None)
 
     # ──────────────────────────────────────────────
     # INTERNAL HELPERS
@@ -547,10 +651,39 @@ Respond with ONLY a valid JSON object:
             gl.rollback("Deal not found")
 
     def _add_user_deal(self, user: Address, deal_id: u256):
-        """Track deal ID in user's deal history."""
+        """Track deal ID in user's deal history (capped to prevent bloat)."""
         try:
             deals_list = json.loads(self.user_deals[user])
         except KeyError:
             deals_list = []
+        # Cap per-user history so a spammy user can't blow up their own
+        # user_deals JSON to the point where reads/writes are unaffordable.
+        if len(deals_list) >= MAX_DEALS_PER_USER:
+            return
         deals_list.append(str(deal_id))
         self.user_deals[user] = json.dumps(deals_list)
+
+    def _scan_deals(self, offset: int, limit: int, status_filter):
+        """
+        Walk the deals map from `offset + 1` for up to `limit` ids,
+        optionally filtering by status. Bounded read.
+        """
+        if limit <= 0:
+            return "[]"
+        if limit > MAX_PAGE_SIZE:
+            limit = MAX_PAGE_SIZE
+        if offset < 0:
+            offset = 0
+
+        start = offset + 1
+        end = min(start + limit, int(self.deal_count) + 1)
+
+        result = []
+        for i in range(start, end):
+            try:
+                deal = json.loads(self.deals[u256(i)])
+                if status_filter is None or deal.get("status") == status_filter:
+                    result.append(deal)
+            except (KeyError, json.JSONDecodeError):
+                continue
+        return json.dumps(result)
