@@ -10,3 +10,4 @@ __pycache__/
 *.pyc
 .vscode/
 .idea/
+clause guard-handoff.zip

@@ -27,15 +27,32 @@ async function waitForTx(writeClient, hash) {
   return receipt;
 }
 
-export async function fetchAllDeals() {
+// Page size must stay <= MAX_PAGE_SIZE in contracts/clauseguard.py.
+const PAGE_SIZE = 50;
+const MAX_PAGES = 40; // safety stop — 2000 deals is plenty for the UI
+
+async function fetchPaginated(functionName) {
   const { readClient } = await getClients();
-  const result = await readClient.readContract({ address: CONTRACT_ADDRESS, functionName: "get_all_deals", args: [], stateStatus: "accepted" });
-  return JSON.parse(result || "[]");
+  const out = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const result = await readClient.readContract({
+      address: CONTRACT_ADDRESS,
+      functionName,
+      args: [page * PAGE_SIZE, PAGE_SIZE],
+      stateStatus: "accepted",
+    });
+    const batch = JSON.parse(result || "[]");
+    out.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+  }
+  return out;
+}
+
+export async function fetchAllDeals() {
+  return await fetchPaginated("get_all_deals");
 }
 export async function fetchOpenDeals() {
-  const { readClient } = await getClients();
-  const result = await readClient.readContract({ address: CONTRACT_ADDRESS, functionName: "get_open_deals", args: [], stateStatus: "accepted" });
-  return JSON.parse(result || "[]");
+  return await fetchPaginated("get_open_deals");
 }
 export async function fetchDeal(dealId) {
   const { readClient } = await getClients();

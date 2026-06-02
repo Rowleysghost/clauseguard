@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useAppKit, useAppKitAccount, useAppKitProvider } from "@reown/appkit/react";
+import { useDisconnect } from "wagmi";
 import * as GL from "./lib/genlayer";
 import { uploadScreenshot, validateImageFile } from "./lib/upload";
 
@@ -688,6 +690,7 @@ function EvidenceForm({ deal, walletAddress, provider, c, onSuccess, onCancel, t
 
   async function handleSubmit() {
     if (!evUrl.trim()) { toast("Provide an evidence URL or upload a screenshot", "error"); return; }
+    if (!evUrl.trim().startsWith("https://")) { toast("Evidence URL must start with https://", "error"); return; }
     if (!evDesc.trim()) { toast("Add a short description", "error"); return; }
     try {
       setSubmitting(true);
@@ -707,7 +710,7 @@ function EvidenceForm({ deal, walletAddress, provider, c, onSuccess, onCancel, t
         </select>
       </Field>
       <Field c={c} label="Evidence URL">
-        <input value={evUrl} onChange={(e) => setEvUrl(e.target.value)} placeholder="https://tracking.carrier.com/... or imgbb URL" style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+        <input value={evUrl} onChange={(e) => setEvUrl(e.target.value)} placeholder="https://tracking.carrier.com/... or imgbb URL" maxLength={2048} style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
       </Field>
       <Field c={c} label="Upload Screenshot">
         <input ref={fileRef} type="file" accept="image/*" onChange={handleFileUpload} style={{ display: "none" }} />
@@ -719,7 +722,7 @@ function EvidenceForm({ deal, walletAddress, provider, c, onSuccess, onCancel, t
         )}
       </Field>
       <Field c={c} label="Description">
-        <textarea value={evDesc} onChange={(e) => setEvDesc(e.target.value)} placeholder="Brief description of what this evidence shows…" rows={3} style={{ ...inp, resize: "vertical" }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+        <textarea value={evDesc} onChange={(e) => setEvDesc(e.target.value)} placeholder="Brief description of what this evidence shows…" rows={3} maxLength={500} style={{ ...inp, resize: "vertical" }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
       </Field>
       <div style={{ display: "flex", gap: 10 }}>
         <Btn kind="ghost" c={c} onClick={onCancel} style={{ flex: 1 }}>Cancel</Btn>
@@ -769,7 +772,7 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
 
       <div style={{ padding: "20px 32px", display: "flex", flexDirection: "column", gap: 16 }}>
         <Field c={c} label={<>Deal Terms <span style={{ color: c.danger }}>*</span></>}>
-          <textarea value={terms} onChange={(e) => setTerms(e.target.value)} placeholder={EXAMPLE} rows={5} style={{ ...inp, resize: "vertical" }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+          <textarea value={terms} onChange={(e) => setTerms(e.target.value)} placeholder={EXAMPLE} rows={5} maxLength={2000} style={{ ...inp, resize: "vertical" }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: c.textMute }}>
             <span>{terms.length} chars · validators read this verbatim</span>
             <button onClick={() => setTerms(EXAMPLE)} style={{ background: "none", border: "none", color: c.accent2, cursor: "pointer", fontSize: 11, padding: 0, fontWeight: 500 }}>Use example</button>
@@ -778,15 +781,15 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
           <Field c={c} label={<>Price / Amount <span style={{ color: c.danger }}>*</span></>}>
-            <input value={price} onChange={(e) => setPrice(e.target.value)} placeholder="e.g. 1.5 GEN" style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+            <input value={price} onChange={(e) => setPrice(e.target.value)} placeholder="e.g. 1.5 GEN" maxLength={200} style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
           </Field>
           <Field c={c} label={<>Deadline <span style={{ color: c.danger }}>*</span></>}>
-            <input value={deadline} onChange={(e) => setDeadline(e.target.value)} placeholder="e.g. May 15, 2026" style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+            <input value={deadline} onChange={(e) => setDeadline(e.target.value)} placeholder="e.g. May 15, 2026" maxLength={200} style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
           </Field>
         </div>
 
         <Field c={c} label="Verification URLs (comma-separated — validators crawl these)">
-          <input value={urls} onChange={(e) => setUrls(e.target.value)} placeholder="https://track.dhl.com/123, https://yoursite.com/order/456" style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+          <input value={urls} onChange={(e) => setUrls(e.target.value)} placeholder="https://track.dhl.com/123, https://yoursite.com/order/456" maxLength={2048} style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
         </Field>
 
         <div>
@@ -1046,7 +1049,7 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
               {showCounterForm && (
                 <div style={{ padding: 14, background: c.surface, border: `1px solid ${c.border}`, borderRadius: 12 }}>
                   <SectionLabel c={c}>Your Counter-terms</SectionLabel>
-                  <textarea value={counterTermsInput} onChange={(e) => setCounterTermsInput(e.target.value)} placeholder="Propose modified deal terms…" rows={4} style={{ background: c.bg, border: `1px solid ${c.border}`, borderRadius: 10, padding: "10px 14px", color: c.text, fontSize: 13, width: "100%", outline: "none", fontFamily: "inherit", resize: "vertical", marginTop: 8 }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+                  <textarea value={counterTermsInput} onChange={(e) => setCounterTermsInput(e.target.value)} placeholder="Propose modified deal terms…" rows={4} maxLength={2000} style={{ background: c.bg, border: `1px solid ${c.border}`, borderRadius: 10, padding: "10px 14px", color: c.text, fontSize: 13, width: "100%", outline: "none", fontFamily: "inherit", resize: "vertical", marginTop: 8 }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
                   <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                     <Btn kind="ghost" c={c} size="sm" style={{ flex: 1 }} onClick={() => { setShowCounterForm(false); setCounterTermsInput(""); }}>Cancel</Btn>
                     <Btn kind="primary" c={c} size="sm" style={{ flex: 2 }} disabled={!counterTermsInput.trim()} onClick={() => { if (!counterTermsInput.trim()) return; tx("Proposing counter-terms…", () => GL.proposeCounterTerms(walletAddress, provider, parseInt(deal.id), counterTermsInput.trim())); setShowCounterForm(false); setCounterTermsInput(""); }}>Submit Proposal</Btn>
@@ -1204,10 +1207,11 @@ export default function ClauseGuardApp() {
 
   const setTweak = (k, v) => setTweaksState((p) => ({ ...p, [k]: v }));
 
-  const [walletAddress, setWalletAddress] = useState(null);
-  const [provider, setProvider]           = useState(null);
-  const [walletLoading, setWalletLoading] = useState(false);
-  const [showSwitchHint, setShowSwitchHint] = useState(false);
+  const { open } = useAppKit();
+  const { address: walletAddress } = useAppKitAccount();
+  const { walletProvider: provider } = useAppKitProvider("eip155");
+  const { disconnect } = useDisconnect();
+  const walletLoading = false;
   const [showTweaks, setShowTweaks]       = useState(false);
 
   const [deals, setDeals]             = useState([]);
@@ -1222,41 +1226,8 @@ export default function ClauseGuardApp() {
   const { toasts, add: toast } = useToast();
 
   // ── Wallet ──────────────────────────────────────────────────
-  async function connectWallet() {
-    if (!window.ethereum) { toast("No wallet detected. Install Rabby or MetaMask.", "error"); return; }
-    try {
-      setWalletLoading(true);
-      try {
-        await window.ethereum.request({ method: "wallet_requestPermissions", params: [{ eth_accounts: {} }] });
-      } catch (permErr) {
-        if (permErr.code === 4001) throw permErr;
-      }
-      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-      if (!accounts.length) throw new Error("No accounts returned");
-      setWalletAddress(accounts[0]);
-      setProvider(window.ethereum);
-      setShowSwitchHint(false);
-      toast("Connected: " + shortAddr(accounts[0]), "success");
-    } catch (err) {
-      if (err.code !== 4001) toast("Connect failed: " + err.message, "error");
-    } finally { setWalletLoading(false); }
-  }
-
-  function disconnectWallet() {
-    setWalletAddress(null);
-    setProvider(null);
-    setShowSwitchHint(true);
-  }
-
-  useEffect(() => {
-    if (!window.ethereum) return;
-    const handler = (accounts) => {
-      if (accounts.length === 0) disconnectWallet();
-      else setWalletAddress(accounts[0]);
-    };
-    window.ethereum.on("accountsChanged", handler);
-    return () => window.ethereum.removeListener?.("accountsChanged", handler);
-  }, []);
+  const connectWallet = useCallback(() => open(), [open]);
+  const disconnectWallet = useCallback(() => disconnect(), [disconnect]);
 
   // ── Load deals ──────────────────────────────────────────────
   const loadDeals = useCallback(async () => {
@@ -1289,17 +1260,6 @@ export default function ClauseGuardApp() {
       <GlobalStyles dark={dark} />
 
       <Header c={c} dark={dark} onToggleTheme={() => setDark((d) => !d)} walletAddress={walletAddress} walletLoading={walletLoading} onConnect={connectWallet} onDisconnect={disconnectWallet} onCreate={() => walletAddress ? setShowCreate(true) : connectWallet()} onRefresh={loadDeals} />
-
-      {/* Switch account hint */}
-      {showSwitchHint && !walletAddress && (
-        <div style={{ background: `${c.accent}14`, borderBottom: `1px solid ${c.border}`, padding: "11px 28px", display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ fontSize: 13, color: c.textDim, flex: 1 }}>
-            <span style={{ color: c.accent2, fontWeight: 600 }}>To switch accounts</span> — open your wallet extension and change the active account there first, then connect here.
-          </span>
-          <button onClick={() => { setShowSwitchHint(false); connectWallet(); }} style={{ background: `linear-gradient(135deg, ${c.accent2}, ${c.accent})`, color: "#fff", border: "none", borderRadius: 99, padding: "7px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Connect wallet</button>
-          <button onClick={() => setShowSwitchHint(false)} style={{ background: "transparent", border: "none", color: c.textMute, cursor: "pointer", fontSize: 18, lineHeight: 1 }}>×</button>
-        </div>
-      )}
 
       <Hero c={c} dark={dark} deals={deals} onCreateClick={() => setShowCreate(true)} onConnectClick={connectWallet} walletAddress={walletAddress} />
 
