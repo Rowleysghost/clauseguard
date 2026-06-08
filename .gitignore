@@ -11,3 +11,6 @@ __pycache__/
 .vscode/
 .idea/
 clause guard-handoff.zip
+
+# Claude Code local instructions (not for GitHub)
+CLAUDE.md
