@@ -68,14 +68,16 @@ export async function fetchDealCount() {
   const { readClient } = await getClients();
   return await readClient.readContract({ address: CONTRACT_ADDRESS, functionName: "get_deal_count", args: [], stateStatus: "accepted" });
 }
-export async function createDeal(walletAddress, provider, { terms, priceDescription, deadlineDescription, verificationUrls, minSourcesRequired = 1 }) {
+export async function createDeal(walletAddress, provider, { terms, priceDescription, deadlineDescription, verificationUrls, minSourcesRequired = 1, collateralWei = "0" }) {
   const { writeClient } = await getClients(walletAddress, provider);
   if (!writeClient) throw new Error("Wallet not connected");
+  // Any value attached at create becomes the seller's good-faith bond, which
+  // the buyer must match when funding.
   const hash = await writeClient.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: "create_deal",
     args: [terms, priceDescription, deadlineDescription, verificationUrls.join(","), minSourcesRequired],
-    value: 0n,
+    value: BigInt(collateralWei || "0"),
   });
   return await waitForTx(writeClient, hash);
 }

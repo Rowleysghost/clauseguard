@@ -99,6 +99,17 @@ class ClauseGuard(gl.Contract):
 
         min_src = max(1, int(min_sources_required))
 
+        # ── Good-faith collateral ──
+        # Any value the seller attaches at creation becomes the required bond.
+        # The buyer must match it when funding. Bonds are returned in full when
+        # the deal settles successfully. If the deal is rejected (conditions
+        # unmet) or the deadline expires, the seller's bond is split 50/50: half
+        # compensates the buyer, half is retained by the protocol (burned). The
+        # split deliberately caps the buyer's upside so a rejection can't be
+        # gamed for profit. collateral_amount = 0 means no bond (classic
+        # behaviour).
+        collateral_amount = int(gl.message.value)
+
         deal = {
             "id": str(deal_id),
             "seller": str(gl.message.sender),
@@ -117,6 +128,9 @@ class ClauseGuard(gl.Contract):
             "pending_terms": "",
             "pending_terms_from": "",
             "verification_attempts": "0",
+            "collateral_amount": str(collateral_amount),
+            "buyer_collateral": "0",
+            "settlement": "",
         }
 
         self.deals[deal_id] = json.dumps(deal)
@@ -140,12 +154,26 @@ class ClauseGuard(gl.Contract):
 
         # Reject zero-value funding — a 0-wei buyer would block the buyer slot
         # without locking value, griefing the seller.
-        if int(gl.message.value) <= 0:
+        value = int(gl.message.value)
+        if value <= 0:
             gl.rollback("Fund amount must be positive")
+
+        # If the seller posted a collateral bond, the buyer must match it on
+        # top of the escrow price. The bond portion is tracked separately so
+        # it can be returned or slashed at settlement; the remainder is the
+        # price held in escrow.
+        collateral = int(deal.get("collateral_amount", "0"))
+        if collateral > 0:
+            if value <= collateral:
+                gl.rollback("Fund amount must cover the collateral bond plus a positive price")
+            deal["buyer_collateral"] = str(collateral)
+            deal["funded_amount"] = str(value - collateral)
+        else:
+            deal["buyer_collateral"] = "0"
+            deal["funded_amount"] = str(value)
 
         deal["buyer"] = str(gl.message.sender)
         deal["status"] = "funded"
-        deal["funded_amount"] = str(gl.message.value)
 
         # Funding invalidates any pending counter-terms proposed before a buyer
         # existed — otherwise an attacker could pre-stage hostile terms.
@@ -545,10 +573,21 @@ Respond with ONLY a valid JSON object:
         if sender != deal["seller"] and sender != deal["buyer"]:
             gl.rollback("Only deal parties can settle")
 
-        # In production: transfer escrowed funds to seller
-        # gl.transfer(Address(deal["seller"]), u256(int(deal["funded_amount"])))
+        # Cooperative outcome — conditions met. Price goes to the seller and
+        # BOTH good-faith bonds are returned to their owners.
+        seller_bond = int(deal.get("collateral_amount", "0"))
+        buyer_bond = int(deal.get("buyer_collateral", "0"))
+        # In production:
+        # gl.transfer(Address(deal["seller"]), u256(int(deal["funded_amount"]) + seller_bond))
+        # if buyer_bond > 0:
+        #     gl.transfer(Address(deal["buyer"]), u256(buyer_bond))
 
         deal["status"] = "settled"
+        deal["settlement"] = json.dumps({
+            "price_to": "seller",
+            "seller_collateral": "returned",
+            "buyer_collateral": "returned",
+        })
         self.deals[deal_id] = json.dumps(deal)
 
     @gl.public.write
@@ -565,10 +604,30 @@ Respond with ONLY a valid JSON object:
         if sender != deal["buyer"]:
             gl.rollback("Only buyer can claim refund")
 
-        # In production: transfer escrowed funds back to buyer
-        # gl.transfer(gl.message.sender, u256(int(deal["funded_amount"])))
+        # Conditions were not met (or the deadline expired). The seller failed
+        # to see the deal through, so the buyer is made whole on the escrow
+        # price AND their own bond. The seller's bond is split 50/50: half is
+        # paid to the buyer as compensation for the wasted deal, half is
+        # retained by the protocol (burned). Capping the buyer's share removes
+        # any incentive to angle for a rejection just to capture the bond.
+        seller_bond = int(deal.get("collateral_amount", "0"))
+        buyer_bond = int(deal.get("buyer_collateral", "0"))
+        # Integer split — the buyer never gets more than half; any odd wei
+        # rounds to the protocol side.
+        seller_to_buyer = seller_bond // 2
+        seller_to_protocol = seller_bond - seller_to_buyer
+        # In production:
+        # gl.transfer(gl.message.sender, u256(int(deal["funded_amount"]) + buyer_bond + seller_to_buyer))
+        # seller_to_protocol stays in the contract (protocol-retained / burned)
 
         deal["status"] = "refunded"
+        deal["settlement"] = json.dumps({
+            "price_to": "buyer",
+            "seller_collateral": "split_buyer_protocol" if seller_bond > 0 else "none",
+            "seller_collateral_to_buyer": str(seller_to_buyer),
+            "seller_collateral_to_protocol": str(seller_to_protocol),
+            "buyer_collateral": "returned" if buyer_bond > 0 else "none",
+        })
         self.deals[deal_id] = json.dumps(deal)
 
     @gl.public.write
@@ -585,7 +644,17 @@ Respond with ONLY a valid JSON object:
         if sender != deal["seller"]:
             gl.rollback("Only seller can cancel their deal")
 
+        # No buyer was ever bound, so the seller's good-faith bond (if any) is
+        # returned in full.
+        seller_bond = int(deal.get("collateral_amount", "0"))
+        # In production:
+        # if seller_bond > 0:
+        #     gl.transfer(Address(deal["seller"]), u256(seller_bond))
+
         deal["status"] = "cancelled"
+        deal["settlement"] = json.dumps({
+            "seller_collateral": "returned" if seller_bond > 0 else "none",
+        })
         self.deals[deal_id] = json.dumps(deal)
 
     # ──────────────────────────────────────────────

@@ -4,39 +4,43 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useAppKit, useAppKitAccount, useAppKitProvider } from "@reown/appkit/react";
 import { useDisconnect } from "wagmi";
 import * as GL from "./lib/genlayer";
-import { uploadScreenshot, validateImageFile } from "./lib/upload";
+import { analyzeProofUrl, PROOF_PRESETS, STRENGTH_META } from "./lib/proof";
 
-// ── Theme tokens ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// THEME — strict GenLayer brand palette
+//   Pink #E37DF7 · Purple #9B6AF6 · Blue #110FFF · Navy #282B5D
+// ══════════════════════════════════════════════════════════════
 const T = {
   dark: {
-    bg:        "#07071a",
-    bgElev:    "#0d0e2a",
-    surface:   "#11122e",
-    surfaceHi: "#181a3a",
-    border:    "rgba(155,106,246,0.18)",
-    borderHi:  "rgba(227,125,247,0.45)",
+    bg:        "#050510",
+    bgElev:    "#0b0b1e",
+    surface:   "#101030",
+    surfaceHi: "#181846",
+    border:    "rgba(155,106,246,0.16)",
+    borderHi:  "rgba(227,125,247,0.5)",
     text:      "#ffffff",
-    textDim:   "#a8a9c8",
-    textMute:  "#6e6f8e",
-    accent:    "#9B6AF6",
-    accent2:   "#E37DF7",
-    accent3:   "#110FFF",
+    textDim:   "#b3b3d4",
+    textMute:  "#6d6e96",
+    accent:    "#9B6AF6",   // purple
+    accent2:   "#E37DF7",   // pink
+    accent3:   "#110FFF",   // blue
     navy:      "#282B5D",
     success:   "#5BE3A4",
     warn:      "#FFB547",
     danger:    "#FF6B8A",
-    shadow:    "0 18px 40px -20px rgba(155,106,246,0.6), 0 6px 18px -8px rgba(0,0,0,0.6)",
+    shadow:    "0 24px 60px -28px rgba(17,15,255,0.55), 0 8px 24px -12px rgba(0,0,0,0.7)",
+    grain:     "rgba(255,255,255,0.04)",
   },
   light: {
-    bg:        "#f5f4fb",
+    bg:        "#f4f3fb",
     bgElev:    "#ffffff",
     surface:   "#ffffff",
-    surfaceHi: "#fafaff",
+    surfaceHi: "#f7f6ff",
     border:    "rgba(40,43,93,0.12)",
     borderHi:  "rgba(155,106,246,0.55)",
-    text:      "#0d0e2a",
-    textDim:   "#4a4c70",
-    textMute:  "#8587a8",
+    text:      "#16163a",
+    textDim:   "#4a4c72",
+    textMute:  "#8385ab",
     accent:    "#7B4AE6",
     accent2:   "#C657E0",
     accent3:   "#110FFF",
@@ -44,8 +48,32 @@ const T = {
     success:   "#1AA86F",
     warn:      "#C97A0F",
     danger:    "#D84662",
-    shadow:    "0 12px 30px -16px rgba(40,43,93,0.25), 0 4px 12px -6px rgba(40,43,93,0.12)",
+    shadow:    "0 18px 44px -22px rgba(40,43,93,0.3), 0 6px 16px -8px rgba(40,43,93,0.14)",
+    grain:     "rgba(40,43,93,0.05)",
   },
+};
+
+// ── Legal / disclaimer content ────────────────────────────────
+// NOTE: replace [JURISDICTION] with your actual governing-law jurisdiction.
+const LEGAL = {
+  updated: "June 2026",
+  jurisdiction: "[JURISDICTION — e.g. Delaware, USA]",
+  intro:
+    "ClauseGuard is experimental, non-custodial software for peer-to-peer escrow on the GenLayer network. Before you use it, please read and accept the following.",
+  sections: [
+    {
+      h: "Not legal or financial advice",
+      b: "ClauseGuard is software, not a law firm, broker, or financial institution. The verdicts produced by GenLayer's AI validators are automated assessments generated from public evidence — they are not legally binding judgments and do not constitute legal, financial, tax, or investment advice. Nothing here replaces a separately enforceable written agreement or a qualified professional. For anything that matters, consult a lawyer and keep your own contract.",
+    },
+    {
+      h: "No liability for loss of funds",
+      b: "You use ClauseGuard entirely at your own risk. To the maximum extent permitted by law, ClauseGuard, its contributors, and GenLayer disclaim all warranties and accept no liability for any loss or damage — including loss of funds, tokens, or data — arising from smart-contract bugs, AI validator error or disagreement, network or chain failures, wallet or key mistakes, mis-written deal terms, third-party services, or unauthorized access. The software is provided “as is” and “as available.”",
+    },
+    {
+      h: "Dispute resolution & governing law",
+      b: "Any dispute, claim, or controversy arising out of or relating to ClauseGuard or these terms shall be resolved exclusively by final and binding individual arbitration, and not in court. You and ClauseGuard each waive the right to a jury trial and the right to participate in any class, collective, or representative action. These terms are governed by, and construed in accordance with, the laws of [JURISDICTION], without regard to its conflict-of-law rules.",
+    },
+  ],
 };
 
 const STATUS_META = {
@@ -70,6 +98,11 @@ const EVIDENCE_TYPES = [
 
 const PIPELINE_STAGES = ["Listed", "Funded", "Evidence", "Verified", "Settled"];
 
+// Mirrors MAX_VERIFICATION_ATTEMPTS in contracts/clauseguard.py — a disputed
+// deal can be re-verified up to this many times before on-chain appeals are
+// exhausted and parties must resolve off-chain via binding arbitration.
+const MAX_VERIFICATION_ATTEMPTS = 3;
+
 const VERIFY_STAGES = [
   "Crawling web evidence",
   "Distributing to validators",
@@ -77,9 +110,32 @@ const VERIFY_STAGES = [
   "Sealing verdict on-chain",
 ];
 
+const MARQUEE_WORDS = ["Autonomous", "Trustless", "On-chain", "AI-verified", "Plain English", "No middlemen"];
+
+// ── Helpers ───────────────────────────────────────────────────
+const EXPLORER = "https://explorer-studio.genlayer.com/address/";
+const CONTRACT = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS;
+
 function shortAddr(addr) {
   if (!addr) return "";
   return addr.slice(0, 6) + "…" + addr.slice(-4);
+}
+
+// wei (string) → GEN display (trimmed)
+function fmtGen(wei) {
+  let g = 0;
+  try { g = Number(BigInt(wei || "0")) / 1e18; } catch { g = 0; }
+  if (!g) return "0";
+  return (Math.round(g * 1e6) / 1e6).toString();
+}
+// GEN (string/number) → wei (string)
+function genToWei(gen) {
+  const n = parseFloat(gen || "0");
+  if (!n || n <= 0) return "0";
+  return BigInt(Math.round(n * 1e18)).toString();
+}
+function hasCollateral(deal) {
+  try { return BigInt(deal?.collateral_amount || "0") > 0n; } catch { return false; }
 }
 
 function dealTitle(deal) {
@@ -95,45 +151,144 @@ function confidencePct(conf) {
   return 38;
 }
 
-// ── Global keyframes ─────────────────────────────────────────
+// IntersectionObserver-based reveal hook
+function useInView(opts = { threshold: 0.18, once: true }) {
+  const ref = useRef(null);
+  const [seen, setSeen] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") { setSeen(true); return; }
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) {
+          setSeen(true);
+          if (opts.once) io.unobserve(e.target);
+        } else if (!opts.once) {
+          setSeen(false);
+        }
+      });
+    }, { threshold: opts.threshold });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [opts.threshold, opts.once]);
+  return [ref, seen];
+}
+
+// Scroll-reveal wrapper
+function Reveal({ children, delay = 0, y = 20, style }) {
+  const [ref, seen] = useInView();
+  return (
+    <div
+      ref={ref}
+      style={{
+        opacity: seen ? 1 : 0,
+        transform: seen ? "translateY(0)" : `translateY(${y}px)`,
+        transition: `opacity 700ms cubic-bezier(.2,.7,.2,1) ${delay}ms, transform 700ms cubic-bezier(.2,.7,.2,1) ${delay}ms`,
+        ...style,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+// Count-up animated number
+function CountUp({ value, dur = 1400, style }) {
+  const [ref, seen] = useInView();
+  const [disp, setDisp] = useState(0);
+  const raw = String(value);
+  const target = parseFloat(raw.replace(/[^0-9.]/g, "")) || 0;
+  const suffix = raw.replace(/[0-9.,\s]/g, "");
+  const decimals = raw.includes(".") ? 1 : 0;
+
+  useEffect(() => {
+    if (!seen) return;
+    let frame;
+    const start = performance.now();
+    const tick = (now) => {
+      const t = Math.min((now - start) / dur, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setDisp(target * eased);
+      if (t < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [seen, target, dur]);
+
+  return (
+    <span ref={ref} style={style}>
+      {disp.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}
+      {suffix}
+    </span>
+  );
+}
+
+// ── Global keyframes + fonts ──────────────────────────────────
 function GlobalStyles({ dark }) {
   return (
     <style>{`
-      @import url('https://api.fontshare.com/v2/css?f[]=switzer@400,500,600,700&f[]=lineca@400&display=swap');
+      @import url('https://api.fontshare.com/v2/css?f[]=switzer@300,400,500,600,700,800&display=swap');
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-      body { font-family: 'Switzer', system-ui, sans-serif; }
+      html { scroll-behavior: smooth; }
+      body { font-family: 'Switzer', system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
       @keyframes cg-fadeup   { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } }
       @keyframes cg-fadein   { from { opacity:0; } to { opacity:1; } }
       @keyframes cg-shimmer  { 0%{background-position:-240px 0;} 100%{background-position:240px 0;} }
       @keyframes cg-pulse    { 0%,100%{box-shadow:0 0 0 0 rgba(227,125,247,0.55),0 0 22px 4px rgba(227,125,247,0.35);} 50%{box-shadow:0 0 0 8px rgba(227,125,247,0),0 0 28px 8px rgba(155,106,246,0.55);} }
-      @keyframes cg-driftA   { 0%{transform:translate(0,0)scale(1);} 50%{transform:translate(8%,-6%)scale(1.15);} 100%{transform:translate(0,0)scale(1);} }
-      @keyframes cg-driftB   { 0%{transform:translate(0,0)scale(1);} 50%{transform:translate(-10%,8%)scale(1.1);} 100%{transform:translate(0,0)scale(1);} }
-      @keyframes cg-driftC   { 0%{transform:translate(0,0)scale(1);} 50%{transform:translate(6%,10%)scale(1.2);} 100%{transform:translate(0,0)scale(1);} }
+      @keyframes cg-driftA   { 0%{transform:translate(0,0)scale(1);} 50%{transform:translate(7%,-5%)scale(1.18);} 100%{transform:translate(0,0)scale(1);} }
+      @keyframes cg-driftB   { 0%{transform:translate(0,0)scale(1);} 50%{transform:translate(-9%,7%)scale(1.12);} 100%{transform:translate(0,0)scale(1);} }
+      @keyframes cg-driftC   { 0%{transform:translate(0,0)scale(1);} 50%{transform:translate(6%,9%)scale(1.22);} 100%{transform:translate(0,0)scale(1);} }
       @keyframes cg-orbit    { from{transform:rotate(0deg);} to{transform:rotate(360deg);} }
+      @keyframes cg-spin     { from{transform:rotate(0deg);} to{transform:rotate(360deg);} }
       @keyframes cg-sweep    { 0%{transform:translateX(-100%);} 100%{transform:translateX(100%);} }
+      @keyframes cg-marquee  { from{transform:translateX(0);} to{transform:translateX(-50%);} }
+      @keyframes cg-gradient { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
+      @keyframes cg-wave     { from{transform:translateX(0);} to{transform:translateX(-260px);} }
+      @keyframes cg-bob      { 0%,100%{transform:translateY(0);} 50%{transform:translateY(-9px);} }
       @keyframes spin        { to{transform:rotate(360deg);} }
+      .cg-grad-text {
+        background: linear-gradient(115deg, #E37DF7 0%, #9B6AF6 45%, #110FFF 100%);
+        background-size: 220% 220%;
+        -webkit-background-clip: text; background-clip: text;
+        -webkit-text-fill-color: transparent; color: transparent;
+        animation: cg-gradient 9s ease infinite;
+      }
       .cg-skeleton {
         background: linear-gradient(90deg, rgba(155,106,246,0.06) 0%, rgba(227,125,247,0.18) 40%, rgba(155,106,246,0.06) 80%);
         background-size: 240px 100%;
         animation: cg-shimmer 1.4s linear infinite;
       }
-      .cg-card-hover { transition: transform 240ms cubic-bezier(.2,.8,.2,1), box-shadow 240ms ease, border-color 240ms ease; }
-      .cg-card-hover:hover { transform: translateY(-2px); }
-      .cg-btn { transition: transform 160ms ease, box-shadow 220ms ease, background 220ms ease, color 220ms ease; }
-      .cg-btn:hover:not(:disabled) { transform: translateY(-1px); }
+      .cg-card-hover { transition: transform 280ms cubic-bezier(.2,.8,.2,1), box-shadow 280ms ease, border-color 280ms ease; }
+      .cg-card-hover:hover { transform: translateY(-4px); }
+      .cg-btn { transition: transform 160ms ease, box-shadow 220ms ease, filter 220ms ease, background 220ms ease, color 220ms ease; }
+      .cg-btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.06); }
       .cg-btn:active:not(:disabled) { transform: translateY(0); }
-      .cg-btn:disabled { opacity: 0.5; cursor: not-allowed !important; }
+      .cg-btn:disabled { opacity: 0.45; cursor: not-allowed !important; }
+      .cg-link-underline { position: relative; }
+      .cg-link-underline::after { content:""; position:absolute; left:0; right:100%; bottom:-2px; height:1.5px; background:linear-gradient(90deg,#E37DF7,#110FFF); transition:right 280ms ease; }
+      .cg-link-underline:hover::after { right:0; }
       input, textarea, select { color-scheme: ${dark ? "dark" : "light"}; font-family: inherit; }
-      ::-webkit-scrollbar { width: 6px; }
-      ::-webkit-scrollbar-thumb { background: rgba(155,106,246,0.3); border-radius: 3px; }
+      ::-webkit-scrollbar { width: 7px; height: 7px; }
+      ::-webkit-scrollbar-thumb { background: rgba(155,106,246,0.32); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(227,125,247,0.5); }
       *::selection { background: rgba(227,125,247,0.4); color: #fff; }
-      a { color: inherit; }
-      .cg-rm * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+      a { color: inherit; text-decoration: none; }
+      .cg-rm * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
+      @media (max-width: 900px) {
+        .cg-hero-grid { grid-template-columns: 1fr !important; gap: 40px !important; }
+        .cg-detail-grid { grid-template-columns: 1fr !important; }
+        .cg-hero-display { font-size: 58px !important; }
+      }
     `}</style>
   );
 }
 
-// ── Brand mark ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// BRAND MARKS & TEXTURES
+// ══════════════════════════════════════════════════════════════
+
+// ClauseGuard mark — interlocking chevrons forming a shield/clasp
 function ClauseGuardMark({ size = 40, animated = true }) {
   return (
     <svg width={size} height={size} viewBox="0 0 64 64" fill="none" style={{ display: "block", flexShrink: 0 }}>
@@ -154,7 +309,38 @@ function ClauseGuardMark({ size = 40, animated = true }) {
   );
 }
 
-// ── Mochi mascot ──────────────────────────────────────────────
+// GenLayer "Strong Mark" nod — the triangle (hands holding/giving = trust).
+// Used subtly as a brand accent, per "ClauseGuard in GenLayer's system".
+function StrongMark({ size = 28, color = "#9B6AF6", stroke = 2.4 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" fill="none" style={{ display: "block" }}>
+      <path d="M24 6 L43 40 L5 40 Z" stroke={color} strokeWidth={stroke} strokeLinejoin="round" fill="none" />
+      <path d="M24 18 L33 34 L15 34 Z" stroke={color} strokeWidth={stroke * 0.8} strokeLinejoin="round" fill="none" opacity="0.55" />
+    </svg>
+  );
+}
+
+// Animated "Data Waves" texture (brand texture: flow of data)
+function DataWaves({ c, opacity = 0.5, height = 220 }) {
+  const wave = (d, color, dur, op) => (
+    <g style={{ animation: `cg-wave ${dur}s linear infinite` }}>
+      <path d={d} fill="none" stroke={color} strokeWidth="1.4" opacity={op} />
+      <path d={d} transform="translate(1440 0)" fill="none" stroke={color} strokeWidth="1.4" opacity={op} />
+    </g>
+  );
+  // 1440 = two tiles of 720; wave shifts by 260px per loop for organic drift
+  const path = (yBase, amp) =>
+    `M0 ${yBase} C 180 ${yBase - amp}, 360 ${yBase + amp}, 540 ${yBase} S 900 ${yBase - amp}, 1080 ${yBase} S 1440 ${yBase + amp}, 1440 ${yBase}`;
+  return (
+    <svg width="100%" height={height} viewBox="0 0 1440 240" preserveAspectRatio="none" style={{ display: "block", opacity }} aria-hidden>
+      {wave(path(120, 46), c.accent2, 22, 0.5)}
+      {wave(path(140, 60), c.accent, 30, 0.4)}
+      {wave(path(160, 36), c.accent3, 26, 0.45)}
+    </svg>
+  );
+}
+
+// ── Mochi mascot — friendly escrow validator ──────────────────
 function Mochi({ size = 140 }) {
   return (
     <svg width={size} height={size * 1.05} viewBox="0 0 200 210" fill="none" style={{ display: "block", overflow: "visible" }}>
@@ -204,32 +390,44 @@ function Icon({ name, size = 18, color = "currentColor" }) {
     case "upload":  return <svg {...p}><path d="M12 16V4M6 10l6-6 6 6"/><path d="M4 18v2a1 1 0 001 1h14a1 1 0 001-1v-2"/></svg>;
     case "spark":   return <svg {...p}><path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/></svg>;
     case "arrowR":  return <svg {...p}><path d="M5 12h14M13 5l7 7-7 7"/></svg>;
+    case "arrowDown": return <svg {...p}><path d="M12 5v14M5 13l7 7 7-7"/></svg>;
     case "sun":     return <svg {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>;
     case "moon":    return <svg {...p}><path d="M21 13a8 8 0 11-9-9 6 6 0 009 9z"/></svg>;
     case "globe":   return <svg {...p}><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/></svg>;
     case "refresh": return <svg {...p}><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 013.51 15"/></svg>;
     case "link":    return <svg {...p}><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>;
     case "clock":   return <svg {...p}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>;
+    case "pen":     return <svg {...p}><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/></svg>;
+    case "lock":    return <svg {...p}><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>;
+    case "scale":   return <svg {...p}><path d="M12 3v18M5 21h14M7 7l-4 7a4 4 0 008 0L7 7zM17 7l-4 7a4 4 0 008 0l-4-7zM3 7h18"/></svg>;
+    case "search":  return <svg {...p}><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>;
     default: return null;
   }
 }
 
-// ── Display (Lineca heading) ──────────────────────────────────
-function Display({ children, size = 64, c, style }) {
+// ── Display heading (Switzer heavy — Lineca if locally licensed) ─
+function Display({ children, size = 64, c, style, as: Tag = "h1", grad = false }) {
   return (
-    <h1 style={{ fontFamily: "'Lineca', 'Switzer', system-ui, sans-serif", fontWeight: 400, fontSize: size, lineHeight: 0.98, letterSpacing: "-0.025em", margin: 0, color: c.text, ...style }}>
+    <Tag
+      className={grad ? "cg-grad-text" : undefined}
+      style={{
+        fontFamily: "'Lineca', 'Switzer', system-ui, sans-serif",
+        fontWeight: 700, fontSize: size, lineHeight: 1.02, letterSpacing: "-0.03em",
+        margin: 0, color: grad ? undefined : c.text, ...style,
+      }}
+    >
       {children}
-    </h1>
+    </Tag>
   );
 }
 
 // ── Primitives ────────────────────────────────────────────────
 function Btn({ kind = "primary", size = "md", children, icon, iconRight, c, style, ...rest }) {
-  const sizes = { sm: { p: "7px 13px", f: 12 }, md: { p: "11px 20px", f: 14 }, lg: { p: "15px 28px", f: 15 } };
+  const sizes = { sm: { p: "7px 14px", f: 12 }, md: { p: "11px 20px", f: 14 }, lg: { p: "15px 30px", f: 15 } };
   const s = sizes[size] || sizes.md;
-  const base = { fontFamily: "inherit", fontWeight: 600, fontSize: s.f, padding: s.p, borderRadius: 999, border: "1px solid transparent", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8, letterSpacing: "-0.01em", lineHeight: 1, ...style };
+  const base = { fontFamily: "inherit", fontWeight: 600, fontSize: s.f, padding: s.p, borderRadius: 999, border: "1px solid transparent", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8, letterSpacing: "-0.01em", lineHeight: 1, whiteSpace: "nowrap", ...style };
   let palette;
-  if (kind === "primary")  palette = { background: `linear-gradient(135deg, ${c.accent2} 0%, ${c.accent} 50%, ${c.accent3} 120%)`, color: "#fff", boxShadow: `0 6px 18px -8px ${c.accent}, inset 0 1px 0 rgba(255,255,255,0.2)` };
+  if (kind === "primary")  palette = { background: `linear-gradient(120deg, ${c.accent2} 0%, ${c.accent} 52%, ${c.accent3} 120%)`, color: "#fff", boxShadow: `0 8px 22px -8px ${c.accent}, inset 0 1px 0 rgba(255,255,255,0.22)` };
   else if (kind === "ghost")   palette = { background: "transparent", color: c.text, border: `1px solid ${c.border}` };
   else if (kind === "subtle")  palette = { background: c.surface, color: c.text, border: `1px solid ${c.border}` };
   else if (kind === "danger")  palette = { background: "transparent", color: c.danger, border: `1px solid ${c.danger}55` };
@@ -247,9 +445,9 @@ function Card({ children, c, style, hover = false, onClick, ...rest }) {
   return (
     <div
       className={hover ? "cg-card-hover" : ""}
-      style={{ background: c.surface, border: `1px solid ${c.border}`, borderRadius: 18, padding: 22, boxShadow: c.shadow, ...style }}
+      style={{ background: c.surface, border: `1px solid ${c.border}`, borderRadius: 20, padding: 24, boxShadow: c.shadow, ...style }}
       onClick={onClick}
-      onMouseEnter={hover ? (e) => { e.currentTarget.style.borderColor = c.borderHi; e.currentTarget.style.boxShadow = `0 22px 50px -22px ${c.accent}aa, 0 8px 24px -10px rgba(0,0,0,0.5)`; } : undefined}
+      onMouseEnter={hover ? (e) => { e.currentTarget.style.borderColor = c.borderHi; e.currentTarget.style.boxShadow = `0 28px 60px -24px ${c.accent}aa, 0 10px 28px -12px rgba(0,0,0,0.55)`; } : undefined}
       onMouseLeave={hover ? (e) => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.boxShadow = c.shadow; } : undefined}
       {...rest}
     >
@@ -277,8 +475,8 @@ function Pill({ children, c, tone = "default", style }) {
   );
 }
 
-const SectionLabel = ({ c, children }) => (
-  <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600 }}>{children}</div>
+const SectionLabel = ({ c, children, style }) => (
+  <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.16em", textTransform: "uppercase", fontWeight: 600, ...style }}>{children}</div>
 );
 
 const Field = ({ c, label, children }) => (
@@ -322,8 +520,8 @@ function Pipeline({ c, status }) {
   );
 }
 
-// ── Validator ring (hero decoration) ─────────────────────────
-function ValidatorRing({ c, active = true }) {
+// ── Validator ring ────────────────────────────────────────────
+function ValidatorRing({ c, active = true, mark = 36 }) {
   const N = 5, radius = 58;
   return (
     <div style={{ position: "relative", height: 140, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -339,13 +537,13 @@ function ValidatorRing({ c, active = true }) {
         })}
       </div>
       <div style={{ width: 64, height: 64, borderRadius: 99, background: c.bgElev, border: `1px solid ${c.border}`, display: "flex", alignItems: "center", justifyContent: "center", position: "relative", zIndex: 2, boxShadow: `0 0 0 1px ${c.borderHi}, 0 0 24px ${c.accent}66` }}>
-        <ClauseGuardMark size={36} />
+        <ClauseGuardMark size={mark} />
       </div>
     </div>
   );
 }
 
-// ── Featured deal card (hero right panel) ─────────────────────
+// ── Featured deal visual ──────────────────────────────────────
 function FeaturedDealVis({ c, dark, deal }) {
   const title   = deal ? dealTitle(deal) : "Vintage Leica M6 — Hong Kong → Berlin";
   const amount  = deal ? deal.price_description : "2,400 GEN";
@@ -354,9 +552,8 @@ function FeaturedDealVis({ c, dark, deal }) {
 
   return (
     <div style={{ position: "relative" }}>
-      <div style={{ position: "absolute", inset: -1, borderRadius: 24, background: `linear-gradient(135deg, ${c.accent2}, ${c.accent}, ${c.accent3})`, opacity: 0.45, filter: "blur(18px)" }} />
-      <Card c={c} style={{ position: "relative", padding: 0, overflow: "hidden", borderRadius: 22, background: dark ? "#0c0d24" : c.surface }}>
-        {/* Window chrome */}
+      <div style={{ position: "absolute", inset: -1, borderRadius: 26, background: `linear-gradient(135deg, ${c.accent2}, ${c.accent}, ${c.accent3})`, opacity: 0.5, filter: "blur(22px)" }} />
+      <Card c={c} style={{ position: "relative", padding: 0, overflow: "hidden", borderRadius: 24, background: dark ? "#0a0a22" : c.surface }}>
         <div style={{ padding: "16px 20px", display: "flex", alignItems: "center", gap: 10, borderBottom: `1px solid ${c.border}` }}>
           <div style={{ display: "flex", gap: 5 }}>
             <span style={{ width: 10, height: 10, borderRadius: 99, background: c.danger }} />
@@ -369,21 +566,21 @@ function FeaturedDealVis({ c, dark, deal }) {
           <span style={{ flex: 1 }} />
           <Pill c={c} tone={meta.tone}>{meta.label}</Pill>
         </div>
-        <div style={{ padding: 22 }}>
+        <div style={{ padding: 24 }}>
           <SectionLabel c={c}>Clause</SectionLabel>
           <p style={{ margin: "10px 0 0", fontSize: 15, color: c.text, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-            <span style={{ color: c.accent2 }}>"</span>{title}<span style={{ color: c.accent2 }}>"</span>
+            <span style={{ color: c.accent2 }}>&ldquo;</span>{title}<span style={{ color: c.accent2 }}>&rdquo;</span>
           </p>
           <div style={{ height: 1, background: c.border, margin: "20px 0" }} />
           <ValidatorRing c={c} />
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20, alignItems: "flex-end" }}>
             <div>
               <SectionLabel c={c}>In escrow</SectionLabel>
-              <div style={{ fontFamily: "'Lineca', sans-serif", fontSize: 32, color: c.text, lineHeight: 1, marginTop: 6, fontVariantNumeric: "tabular-nums" }}>{amount}</div>
+              <div style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 32, color: c.text, lineHeight: 1, marginTop: 6, fontVariantNumeric: "tabular-nums" }}>{amount}</div>
             </div>
             <div style={{ textAlign: "right" }}>
               <SectionLabel c={c}>Consensus</SectionLabel>
-              <div style={{ fontFamily: "'Lineca', sans-serif", fontSize: 32, color: c.accent2, lineHeight: 1, marginTop: 6, fontVariantNumeric: "tabular-nums" }}>
+              <div style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 32, color: c.accent2, lineHeight: 1, marginTop: 6, fontVariantNumeric: "tabular-nums" }}>
                 4<span style={{ fontSize: 16, color: c.textDim }}>/5</span>
               </div>
             </div>
@@ -394,20 +591,22 @@ function FeaturedDealVis({ c, dark, deal }) {
   );
 }
 
-// ── Dialog ────────────────────────────────────────────────────
-function Dialog({ c, onClose, children, wide = false }) {
+// ── Dialog shell ──────────────────────────────────────────────
+function Dialog({ c, onClose, children, wide = false, dismissable = true }) {
   useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e) => { if (e.key === "Escape" && dismissable) onClose(); };
     window.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
     return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = ""; };
-  }, [onClose]);
+  }, [onClose, dismissable]);
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(7,7,26,0.75)", backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "4vh 20px", animation: "cg-fadein 220ms ease both" }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ position: "relative", width: "100%", maxWidth: wide ? 880 : 600, maxHeight: "92vh", overflowY: "auto", background: c.bgElev, border: `1px solid ${c.border}`, borderRadius: 22, boxShadow: "0 40px 80px -20px rgba(0,0,0,0.7)", animation: "cg-fadeup 320ms ease both" }}>
-        <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, zIndex: 2, width: 32, height: 32, borderRadius: 99, background: "transparent", color: c.textDim, border: `1px solid ${c.border}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
-          <Icon name="x" size={14} />
-        </button>
+    <div style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(5,5,16,0.78)", backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "4vh 20px", animation: "cg-fadein 220ms ease both" }} onClick={dismissable ? onClose : undefined}>
+      <div onClick={(e) => e.stopPropagation()} style={{ position: "relative", width: "100%", maxWidth: wide ? 880 : 600, maxHeight: "92vh", overflowY: "auto", background: c.bgElev, border: `1px solid ${c.border}`, borderRadius: 24, boxShadow: "0 40px 90px -20px rgba(0,0,0,0.75)", animation: "cg-fadeup 320ms ease both" }}>
+        {dismissable && (
+          <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, zIndex: 2, width: 32, height: 32, borderRadius: 99, background: "transparent", color: c.textDim, border: `1px solid ${c.border}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+            <Icon name="x" size={14} />
+          </button>
+        )}
         {children}
       </div>
     </div>
@@ -427,7 +626,7 @@ function useToast() {
 
 function ToastStack({ toasts, c }) {
   return (
-    <div style={{ position: "fixed", top: 80, right: 24, zIndex: 300, display: "flex", flexDirection: "column", gap: 10, width: 310 }}>
+    <div style={{ position: "fixed", top: 80, right: 24, zIndex: 400, display: "flex", flexDirection: "column", gap: 10, width: 310 }}>
       {toasts.map((t) => (
         <div key={t.id} style={{ padding: "13px 16px", borderRadius: 12, animation: "cg-fadeup 280ms ease both", background: c.bgElev, border: `1px solid ${t.kind === "error" ? "rgba(255,107,138,0.4)" : t.kind === "success" ? "rgba(91,227,164,0.4)" : c.borderHi}`, boxShadow: c.shadow, display: "flex", gap: 12, alignItems: "flex-start" }}>
           <div style={{ width: 22, height: 22, borderRadius: 99, flexShrink: 0, background: t.kind === "error" ? c.danger : t.kind === "success" ? c.success : `linear-gradient(135deg, ${c.accent2}, ${c.accent})`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 0 10px ${t.kind === "error" ? c.danger : t.kind === "success" ? c.success : c.accent2}88` }}>
@@ -440,10 +639,10 @@ function ToastStack({ toasts, c }) {
   );
 }
 
-// ── TX spinner overlay ────────────────────────────────────────
+// ── TX overlay ────────────────────────────────────────────────
 function TxOverlay({ msg, c }) {
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(7,7,26,0.85)", zIndex: 500, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20, backdropFilter: "blur(6px)" }}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(5,5,16,0.88)", zIndex: 500, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20, backdropFilter: "blur(6px)" }}>
       <div style={{ width: 52, height: 52, borderRadius: "50%", border: `4px solid ${c.border}`, borderTopColor: c.accent2, animation: "spin 0.9s linear infinite" }} />
       <div style={{ color: c.text, fontSize: 16, fontWeight: 500 }}>{msg}</div>
       <div style={{ color: c.textMute, fontSize: 13 }}>Waiting for GenLayer consensus…</div>
@@ -451,7 +650,7 @@ function TxOverlay({ msg, c }) {
   );
 }
 
-// ── Skeleton card ─────────────────────────────────────────────
+// ── Skeleton ──────────────────────────────────────────────────
 function SkeletonCard({ c }) {
   return (
     <Card c={c} style={{ pointerEvents: "none" }}>
@@ -472,24 +671,100 @@ function SkeletonCard({ c }) {
   );
 }
 
-// ── Header ────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// LEGAL — acceptance gate + full Terms dialog
+// ══════════════════════════════════════════════════════════════
+function AcceptanceGate({ c, onAccept, onReadFull }) {
+  const [checked, setChecked] = useState(false);
+  return (
+    <Dialog c={c} onClose={() => {}} dismissable={false}>
+      <div style={{ padding: "34px 36px 8px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: `linear-gradient(135deg, ${c.accent2}22, ${c.accent3}18)`, border: `1px solid ${c.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon name="scale" size={22} color={c.accent2} />
+          </div>
+          <Display c={c} size={26} as="h2">Before you begin</Display>
+        </div>
+        <p style={{ color: c.textDim, fontSize: 14, lineHeight: 1.6 }}>{LEGAL.intro}</p>
+      </div>
+      <div style={{ padding: "16px 36px", display: "flex", flexDirection: "column", gap: 14 }}>
+        {LEGAL.sections.map((s) => (
+          <div key={s.h} style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+            <div style={{ marginTop: 3, color: c.accent, flexShrink: 0 }}><StrongMark size={18} color={c.accent} /></div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13.5, color: c.text, marginBottom: 3 }}>{s.h}</div>
+              <div style={{ fontSize: 12.5, color: c.textMute, lineHeight: 1.55 }}>{s.b.length > 200 ? s.b.slice(0, 196) + "…" : s.b}</div>
+            </div>
+          </div>
+        ))}
+        <button onClick={onReadFull} className="cg-link-underline" style={{ alignSelf: "flex-start", background: "none", border: "none", color: c.accent2, fontSize: 12.5, fontWeight: 600, cursor: "pointer", padding: 0 }}>
+          Read the full Terms & Disclaimer
+        </button>
+      </div>
+      <div style={{ padding: "18px 36px 30px", borderTop: `1px solid ${c.border}`, marginTop: 8 }}>
+        <label style={{ display: "flex", gap: 11, alignItems: "flex-start", cursor: "pointer", marginBottom: 16 }}>
+          <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} style={{ marginTop: 2, accentColor: c.accent2, width: 17, height: 17, flexShrink: 0 }} />
+          <span style={{ fontSize: 13, color: c.textDim, lineHeight: 1.5 }}>
+            I have read and agree to the Terms & Disclaimer. I understand ClauseGuard provides no legal or financial advice, accepts no liability for loss of funds, and that disputes are resolved by binding arbitration.
+          </span>
+        </label>
+        <Btn kind="primary" size="lg" c={c} iconRight="arrowR" disabled={!checked} onClick={onAccept} style={{ width: "100%", justifyContent: "center" }}>
+          I understand &amp; agree
+        </Btn>
+      </div>
+    </Dialog>
+  );
+}
+
+function TermsDialog({ c, onClose }) {
+  return (
+    <Dialog c={c} onClose={onClose} wide>
+      <div style={{ padding: "30px 36px 18px", borderBottom: `1px solid ${c.border}` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <Icon name="scale" size={22} color={c.accent2} />
+          <Display c={c} size={26} as="h2">Terms &amp; Disclaimer</Display>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 12, color: c.textMute }}>Last updated {LEGAL.updated} · Governing law: {LEGAL.jurisdiction}</div>
+      </div>
+      <div style={{ padding: "24px 36px 32px", display: "flex", flexDirection: "column", gap: 22 }}>
+        <p style={{ fontSize: 14, color: c.textDim, lineHeight: 1.65 }}>{LEGAL.intro}</p>
+        {LEGAL.sections.map((s, i) => (
+          <div key={s.h}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: c.accent }}>{String(i + 1).padStart(2, "0")}</span>
+              <h3 style={{ fontSize: 16, fontWeight: 700, color: c.text }}>{s.h}</h3>
+            </div>
+            <p style={{ fontSize: 13.5, color: c.textDim, lineHeight: 1.7 }}>{s.b}</p>
+          </div>
+        ))}
+        <div style={{ fontSize: 12, color: c.textMute, lineHeight: 1.6, borderTop: `1px solid ${c.border}`, paddingTop: 18 }}>
+          ClauseGuard runs on the GenLayer studionet network and is provided for evaluation. By connecting a wallet or interacting with any deal you reaffirm your acceptance of these terms.
+        </div>
+        <Btn kind="primary" c={c} onClick={onClose} style={{ alignSelf: "flex-end" }}>Close</Btn>
+      </div>
+    </Dialog>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// LAYOUT — Header
+// ══════════════════════════════════════════════════════════════
 function Header({ c, dark, onToggleTheme, walletAddress, walletLoading, onConnect, onDisconnect, onCreate, onRefresh }) {
   return (
-    <header style={{ position: "sticky", top: 0, zIndex: 100, backdropFilter: "saturate(140%) blur(18px)", WebkitBackdropFilter: "saturate(140%) blur(18px)", background: dark ? "rgba(7,7,26,0.78)" : "rgba(245,244,251,0.85)", borderBottom: `1px solid ${c.border}` }}>
+    <header style={{ position: "sticky", top: 0, zIndex: 100, backdropFilter: "saturate(150%) blur(20px)", WebkitBackdropFilter: "saturate(150%) blur(20px)", background: dark ? "rgba(5,5,16,0.7)" : "rgba(244,243,251,0.82)", borderBottom: `1px solid ${c.border}` }}>
       <div style={{ maxWidth: 1280, margin: "0 auto", padding: "13px 28px", display: "flex", alignItems: "center", gap: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <a href="#top" style={{ display: "flex", alignItems: "center", gap: 11 }}>
           <ClauseGuardMark size={32} />
           <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
-            <span style={{ fontFamily: "'Lineca', sans-serif", fontSize: 18, letterSpacing: "-0.01em", color: c.text }}>clauseguard</span>
-            <span style={{ fontSize: 10, color: c.textMute, letterSpacing: "0.16em", textTransform: "uppercase", marginTop: 3 }}>studionet · testnet</span>
+            <span style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 18, letterSpacing: "-0.02em", color: c.text }}>clauseguard</span>
+            <span style={{ fontSize: 9.5, color: c.textMute, letterSpacing: "0.18em", textTransform: "uppercase", marginTop: 3 }}>Built on GenLayer</span>
           </div>
-        </div>
+        </a>
 
-        <nav style={{ display: "flex", gap: 4, marginLeft: 24 }}>
-          <a href="#deals" style={{ padding: "8px 14px", borderRadius: 8, fontSize: 14, fontWeight: 500, color: c.text, textDecoration: "none", position: "relative" }}>
-            Deals
-            <span style={{ position: "absolute", left: 14, right: 14, bottom: 2, height: 2, background: `linear-gradient(90deg, ${c.accent2}, ${c.accent3})`, borderRadius: 2 }} />
-          </a>
+        <nav style={{ display: "flex", gap: 6, marginLeft: 26 }}>
+          {[["#deals", "Deals"], ["#how", "How it works"], ["#trust", "Trust"]].map(([href, label]) => (
+            <a key={href} href={href} className="cg-link-underline" style={{ padding: "8px 12px", borderRadius: 8, fontSize: 14, fontWeight: 500, color: c.textDim }}>{label}</a>
+          ))}
         </nav>
 
         <div style={{ flex: 1 }} />
@@ -497,7 +772,7 @@ function Header({ c, dark, onToggleTheme, walletAddress, walletLoading, onConnec
         <button className="cg-btn" onClick={onRefresh} style={{ background: "transparent", border: `1px solid ${c.border}`, borderRadius: 99, width: 36, height: 36, display: "inline-flex", alignItems: "center", justifyContent: "center", color: c.textDim, cursor: "pointer" }} title="Refresh deals">
           <Icon name="refresh" size={15} />
         </button>
-        <button className="cg-btn" onClick={onToggleTheme} style={{ background: "transparent", border: `1px solid ${c.border}`, borderRadius: 99, width: 36, height: 36, display: "inline-flex", alignItems: "center", justifyContent: "center", color: c.textDim, cursor: "pointer" }}>
+        <button className="cg-btn" onClick={onToggleTheme} style={{ background: "transparent", border: `1px solid ${c.border}`, borderRadius: 99, width: 36, height: 36, display: "inline-flex", alignItems: "center", justifyContent: "center", color: c.textDim, cursor: "pointer" }} title="Toggle theme">
           <Icon name={dark ? "sun" : "moon"} size={15} />
         </button>
 
@@ -521,74 +796,184 @@ function Header({ c, dark, onToggleTheme, walletAddress, walletLoading, onConnec
   );
 }
 
-// ── Hero section ──────────────────────────────────────────────
+// ── Hero ──────────────────────────────────────────────────────
 function Hero({ c, dark, deals, onCreateClick, onConnectClick, walletAddress }) {
   const liveStats = [
     { label: "Total deals",  val: deals.length },
-    { label: "Open",         val: deals.filter((d) => d.status === "open").length },
+    { label: "Open now",     val: deals.filter((d) => d.status === "open").length },
     { label: "Settled",      val: deals.filter((d) => d.status === "settled").length },
     { label: "Validator agreement", val: "99.4%" },
   ];
   const featuredDeal = deals.find((d) => ["evidence_submitted", "verified", "funded"].includes(d.status)) || deals[deals.length - 1] || null;
 
   return (
-    <section style={{ position: "relative", overflow: "hidden", padding: "72px 28px 92px", borderBottom: `1px solid ${c.border}` }}>
-      {/* Animated mesh gradient */}
+    <section id="top" style={{ position: "relative", overflow: "hidden", padding: "84px 28px 0", borderBottom: `1px solid ${c.border}` }}>
+      {/* Animated GenLayer gradient mesh + grain + dot grid */}
       <div aria-hidden style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
-        <div style={{ position: "absolute", top: "-20%", left: "-10%", width: 680, height: 680, borderRadius: "50%", background: `radial-gradient(circle at 30% 30%, ${c.accent2}cc 0%, ${c.accent2}00 60%)`, filter: "blur(40px)", animation: "cg-driftA 14s ease-in-out infinite", opacity: dark ? 0.55 : 0.30 }} />
-        <div style={{ position: "absolute", top: "10%", right: "-10%", width: 760, height: 760, borderRadius: "50%", background: `radial-gradient(circle at 60% 40%, ${c.accent}dd 0%, ${c.accent}00 65%)`, filter: "blur(48px)", animation: "cg-driftB 18s ease-in-out infinite", opacity: dark ? 0.55 : 0.32 }} />
-        <div style={{ position: "absolute", bottom: "-30%", left: "20%", width: 820, height: 820, borderRadius: "50%", background: `radial-gradient(circle at 50% 50%, ${c.accent3}aa 0%, ${c.accent3}00 60%)`, filter: "blur(56px)", animation: "cg-driftC 22s ease-in-out infinite", opacity: dark ? 0.45 : 0.20 }} />
-        <div style={{ position: "absolute", inset: 0, backgroundImage: `radial-gradient(${dark ? "rgba(255,255,255,0.06)" : "rgba(40,43,93,0.10)"} 1px, transparent 1px)`, backgroundSize: "22px 22px", maskImage: "radial-gradient(ellipse at center, black 30%, transparent 75%)", WebkitMaskImage: "radial-gradient(ellipse at center, black 30%, transparent 75%)" }} />
+        <div style={{ position: "absolute", top: "-22%", left: "-10%", width: 700, height: 700, borderRadius: "50%", background: `radial-gradient(circle at 30% 30%, ${c.accent2}cc 0%, ${c.accent2}00 60%)`, filter: "blur(44px)", animation: "cg-driftA 16s ease-in-out infinite", opacity: dark ? 0.55 : 0.3 }} />
+        <div style={{ position: "absolute", top: "6%", right: "-12%", width: 780, height: 780, borderRadius: "50%", background: `radial-gradient(circle at 60% 40%, ${c.accent}dd 0%, ${c.accent}00 65%)`, filter: "blur(52px)", animation: "cg-driftB 20s ease-in-out infinite", opacity: dark ? 0.55 : 0.32 }} />
+        <div style={{ position: "absolute", bottom: "-34%", left: "18%", width: 860, height: 860, borderRadius: "50%", background: `radial-gradient(circle at 50% 50%, ${c.accent3}aa 0%, ${c.accent3}00 60%)`, filter: "blur(60px)", animation: "cg-driftC 24s ease-in-out infinite", opacity: dark ? 0.5 : 0.2 }} />
+        <div style={{ position: "absolute", inset: 0, backgroundImage: `radial-gradient(${dark ? "rgba(255,255,255,0.05)" : "rgba(40,43,93,0.09)"} 1px, transparent 1px)`, backgroundSize: "24px 24px", maskImage: "radial-gradient(ellipse at center, black 30%, transparent 75%)", WebkitMaskImage: "radial-gradient(ellipse at center, black 30%, transparent 75%)" }} />
       </div>
 
-      <div style={{ position: "relative", maxWidth: 1280, margin: "0 auto", display: "grid", gridTemplateColumns: "1.25fr 1fr", gap: 56, alignItems: "center" }}>
-        {/* Left: copy */}
+      <div className="cg-hero-grid" style={{ position: "relative", maxWidth: 1280, margin: "0 auto", display: "grid", gridTemplateColumns: "1.22fr 1fr", gap: 56, alignItems: "center", paddingBottom: 64 }}>
         <div style={{ animation: "cg-fadeup 700ms ease both" }}>
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "5px 12px 5px 8px", borderRadius: 99, background: dark ? "rgba(255,255,255,0.06)" : "rgba(40,43,93,0.06)", border: `1px solid ${c.border}`, marginBottom: 24 }}>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "5px 13px 5px 8px", borderRadius: 99, background: dark ? "rgba(255,255,255,0.05)" : "rgba(40,43,93,0.05)", border: `1px solid ${c.border}`, marginBottom: 26 }}>
             <span style={{ width: 6, height: 6, borderRadius: 99, background: c.success, boxShadow: `0 0 8px ${c.success}` }} />
-            <span style={{ fontSize: 11, color: c.textDim, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 600 }}>Live on GenLayer Studionet</span>
+            <span style={{ fontSize: 11, color: c.textDim, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 600 }}>Live on GenLayer studionet</span>
           </div>
 
-          <Display c={c} size={84} style={{ maxWidth: 720 }}>
+          <Display c={c} size={88} className="cg-hero-display" style={{ maxWidth: 760 }}>
             Escrow that{" "}
-            <em style={{ fontStyle: "normal", background: `linear-gradient(120deg, ${c.accent2} 0%, ${c.accent} 50%, ${c.accent3} 100%)`, WebkitBackgroundClip: "text", backgroundClip: "text", WebkitTextFillColor: "transparent" }}>reads English.</em>
+            <span className="cg-grad-text">reads English.</span>
           </Display>
 
-          <p style={{ maxWidth: 520, marginTop: 22, fontSize: 18, lineHeight: 1.55, color: c.textDim }}>
-            Write deal terms in plain language. Lock funds on-chain. A network of AI validators crawls the web, reasons over evidence, and releases — or refunds — autonomously.
+          <p style={{ maxWidth: 530, marginTop: 24, fontSize: 18, lineHeight: 1.6, color: c.textDim }}>
+            Write your deal in plain words. Lock the funds on-chain. A network of AI validators reads the evidence, agrees on the truth, and releases &mdash; or refunds &mdash; on its own. No middleman holding your money.
           </p>
 
-          <div style={{ display: "flex", gap: 12, marginTop: 32, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 12, marginTop: 34, flexWrap: "wrap" }}>
             {walletAddress ? (
-              <Btn kind="primary" size="lg" c={c} iconRight="arrowR" onClick={onCreateClick}>Create your first deal</Btn>
+              <Btn kind="primary" size="lg" c={c} iconRight="arrowR" onClick={onCreateClick}>Start a deal</Btn>
             ) : (
               <Btn kind="primary" size="lg" c={c} icon="wallet" onClick={onConnectClick}>Connect wallet to start</Btn>
             )}
-            <Btn kind="ghost" size="lg" c={c} icon="globe" onClick={() => window.open(`https://explorer-studio.genlayer.com/address/${process.env.NEXT_PUBLIC_CONTRACT_ADDRESS}`, "_blank")}>
-              View contract
+            <Btn kind="ghost" size="lg" c={c} icon="arrowDown" onClick={() => document.getElementById("how")?.scrollIntoView({ behavior: "smooth" })}>
+              See how it works
             </Btn>
           </div>
 
-          <div style={{ display: "flex", gap: 36, marginTop: 52, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 40, marginTop: 54, flexWrap: "wrap" }}>
             {liveStats.map((s, i) => (
-              <div key={s.label} style={{ animation: `cg-fadeup 700ms ${200 + i * 120}ms ease both` }}>
-                <div style={{ fontFamily: "'Lineca', sans-serif", fontSize: 32, color: c.text, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{s.val}</div>
-                <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.16em", textTransform: "uppercase", marginTop: 6, fontWeight: 600 }}>{s.label}</div>
-              </div>
+              <Reveal key={s.label} delay={120 + i * 90}>
+                <div style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 34, color: c.text, lineHeight: 1, letterSpacing: "-0.02em", fontVariantNumeric: "tabular-nums" }}>
+                  <CountUp value={s.val} />
+                </div>
+                <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.16em", textTransform: "uppercase", marginTop: 7, fontWeight: 600 }}>{s.label}</div>
+              </Reveal>
             ))}
           </div>
         </div>
 
-        {/* Right: featured deal card */}
-        <div style={{ animation: "cg-fadeup 700ms 200ms ease both" }}>
+        <div style={{ animation: "cg-fadeup 700ms 180ms ease both" }}>
           <FeaturedDealVis c={c} dark={dark} deal={featuredDeal} />
+        </div>
+      </div>
+
+      {/* Data-wave texture at the base of the hero */}
+      <div style={{ position: "relative", marginInline: -28, marginBottom: -1 }}>
+        <DataWaves c={c} opacity={dark ? 0.6 : 0.4} height={150} />
+      </div>
+    </section>
+  );
+}
+
+// ── Marquee band ──────────────────────────────────────────────
+function Marquee({ c, dark }) {
+  const items = [...MARQUEE_WORDS, ...MARQUEE_WORDS];
+  return (
+    <div style={{ overflow: "hidden", borderBottom: `1px solid ${c.border}`, background: dark ? "rgba(255,255,255,0.015)" : "rgba(40,43,93,0.02)", padding: "16px 0" }}>
+      <div style={{ display: "flex", width: "max-content", gap: 0, animation: "cg-marquee 28s linear infinite" }}>
+        {items.map((w, i) => (
+          <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 30, paddingInline: 30, fontSize: 15, fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase", color: c.textMute, whiteSpace: "nowrap" }}>
+            {w}
+            <StrongMark size={14} color={c.accent} stroke={2.8} />
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── How it works ──────────────────────────────────────────────
+function HowItWorks({ c }) {
+  const steps = [
+    { n: "01", icon: "pen",    t: "Write the clause", d: "In plain English. No legalese, no smart-contract syntax. The validators read exactly what you wrote — word for word." },
+    { n: "02", icon: "lock",   t: "Lock the funds",   d: "Escrowed on the GenLayer studionet chain. Visible to both parties, untouchable by either, until AI consensus decides." },
+    { n: "03", icon: "spark",  t: "AI reaches a verdict", d: "Validators crawl the open web, reason over the evidence, and agree on an outcome in minutes via Optimistic Democracy." },
+  ];
+  return (
+    <section id="how" style={{ maxWidth: 1280, margin: "0 auto", padding: "100px 28px 40px" }}>
+      <Reveal>
+        <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 24, flexWrap: "wrap", marginBottom: 48 }}>
+          <div>
+            <SectionLabel c={c} style={{ marginBottom: 14 }}>001 / How it works</SectionLabel>
+            <Display c={c} size={52} as="h2" style={{ maxWidth: 560 }}>Trust without the middleman.</Display>
+          </div>
+          <p style={{ maxWidth: 360, fontSize: 15, color: c.textDim, lineHeight: 1.65 }}>
+            Three steps from handshake to settlement. The hard part &mdash; deciding who&rsquo;s right &mdash; is handled by a transparent network of AI arbiters, not a company.
+          </p>
+        </div>
+      </Reveal>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18 }}>
+        {steps.map((step, i) => (
+          <Reveal key={step.n} delay={i * 120}>
+            <Card c={c} hover style={{ height: "100%", position: "relative", overflow: "hidden" }}>
+              <div aria-hidden style={{ position: "absolute", top: -20, right: -10, fontFamily: "'Lineca', sans-serif", fontWeight: 800, fontSize: 130, color: c.accent2, opacity: 0.07, lineHeight: 1 }}>{step.n}</div>
+              <div style={{ width: 46, height: 46, borderRadius: 13, background: `linear-gradient(135deg, ${c.accent2}26, ${c.accent3}1a)`, border: `1px solid ${c.border}`, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 20 }}>
+                <Icon name={step.icon} size={22} color={c.accent2} />
+              </div>
+              <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.16em", fontWeight: 600, marginBottom: 8 }}>STEP {step.n}</div>
+              <h3 style={{ margin: 0, fontSize: 20, color: c.text, fontWeight: 700, letterSpacing: "-0.02em" }}>{step.t}</h3>
+              <p style={{ margin: "10px 0 0", fontSize: 14.5, color: c.textDim, lineHeight: 1.6 }}>{step.d}</p>
+            </Card>
+          </Reveal>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// ── Trust band (validator consensus explainer) ────────────────
+function TrustBand({ c, dark }) {
+  const points = [
+    { t: "A diverse network, not one judge", d: "Many independent AI validators each reach their own conclusion. No single model, company, or person decides your outcome." },
+    { t: "Evidence from the open web", d: "Validators crawl the verification URLs and public sources you provide, then reason over what they find." },
+    { t: "Optimistic Democracy", d: "Validators converge on a verdict. Disagreement triggers re-review and appeal — settlement only happens on consensus." },
+  ];
+  return (
+    <section id="trust" style={{ position: "relative", overflow: "hidden", borderTop: `1px solid ${c.border}`, borderBottom: `1px solid ${c.border}`, background: dark ? "rgba(155,106,246,0.03)" : "rgba(155,106,246,0.04)" }}>
+      <div aria-hidden style={{ position: "absolute", inset: 0, opacity: 0.5 }}>
+        <div style={{ position: "absolute", bottom: -120, left: "50%", transform: "translateX(-50%)", width: 1100, height: 360, background: `radial-gradient(ellipse at center, ${c.accent}22 0%, transparent 70%)`, filter: "blur(30px)" }} />
+      </div>
+      <div style={{ position: "relative", maxWidth: 1280, margin: "0 auto", padding: "96px 28px", display: "grid", gridTemplateColumns: "0.9fr 1.1fr", gap: 64, alignItems: "center" }} className="cg-hero-grid">
+        <Reveal>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 18 }}>
+            <div style={{ transform: "scale(1.4)", margin: "20px 0" }}>
+              <ValidatorRing c={c} mark={40} />
+            </div>
+            <div style={{ fontSize: 12, color: c.textMute, letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 600 }}>5 validators · 4 in agreement</div>
+          </div>
+        </Reveal>
+        <div>
+          <Reveal>
+            <SectionLabel c={c} style={{ marginBottom: 14 }}>002 / Why you can trust it</SectionLabel>
+            <Display c={c} size={46} as="h2" style={{ maxWidth: 520, marginBottom: 32 }}>
+              Nobody holds the gavel. <span className="cg-grad-text">Everybody checks the work.</span>
+            </Display>
+          </Reveal>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {points.map((p, i) => (
+              <Reveal key={p.t} delay={i * 110}>
+                <div style={{ display: "flex", gap: 16, padding: "16px 0", borderTop: `1px solid ${c.border}` }}>
+                  <div style={{ flexShrink: 0, marginTop: 2 }}><StrongMark size={22} color={c.accent2} /></div>
+                  <div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: c.text, marginBottom: 5 }}>{p.t}</div>
+                    <div style={{ fontSize: 14, color: c.textDim, lineHeight: 1.6 }}>{p.d}</div>
+                  </div>
+                </div>
+              </Reveal>
+            ))}
+          </div>
         </div>
       </div>
     </section>
   );
 }
 
-// ── Verifying state (in-dialog animation) ─────────────────────
+// ══════════════════════════════════════════════════════════════
+// DEAL FLOWS (functionality preserved)
+// ══════════════════════════════════════════════════════════════
 function VerifyingState({ c, stage, validators }) {
   return (
     <div style={{ marginTop: 14 }}>
@@ -607,7 +992,6 @@ function VerifyingState({ c, stage, validators }) {
           );
         })}
       </div>
-
       {validators.length > 0 && (
         <div style={{ marginTop: 18 }}>
           <SectionLabel c={c}>Validators reporting</SectionLabel>
@@ -625,11 +1009,9 @@ function VerifyingState({ c, stage, validators }) {
   );
 }
 
-// ── Verdict panel ─────────────────────────────────────────────
-function VerdictPanel({ c, verdictDetails, deal }) {
+function VerdictPanel({ c, verdictDetails }) {
   const isRelease = verdictDetails?.conditions_met === true;
   const pct = confidencePct(verdictDetails?.confidence);
-
   return (
     <div style={{ marginTop: 14, animation: "cg-fadeup 500ms ease both" }}>
       <div style={{ position: "relative", overflow: "hidden", padding: "18px 18px 16px", borderRadius: 14, border: `1px solid ${isRelease ? "rgba(91,227,164,0.4)" : "rgba(255,107,138,0.4)"}`, background: isRelease ? "linear-gradient(135deg, rgba(91,227,164,0.08), rgba(91,227,164,0.02))" : "linear-gradient(135deg, rgba(255,107,138,0.08), rgba(255,107,138,0.02))" }}>
@@ -638,7 +1020,7 @@ function VerdictPanel({ c, verdictDetails, deal }) {
             <Icon name={isRelease ? "check" : "x"} size={18} color="#fff" />
           </div>
           <div>
-            <div style={{ fontFamily: "'Lineca', sans-serif", fontSize: 22, color: c.text, lineHeight: 1 }}>
+            <div style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 22, color: c.text, lineHeight: 1 }}>
               {isRelease ? "Release funds" : "Refund buyer"}
             </div>
             <div style={{ marginTop: 4, fontSize: 12, color: c.textDim }}>
@@ -663,34 +1045,110 @@ function VerdictPanel({ c, verdictDetails, deal }) {
   );
 }
 
-// ── Evidence upload form ──────────────────────────────────────
+// Appeal / dispute panel — shown when validators fail to reach consensus.
+// While attempts remain, parties can add evidence and re-verify; once the
+// on-chain attempt cap is hit, the deal falls back to binding arbitration.
+function AppealPanel({ c, verdictDetails, attempts, attemptsLeft, appealsExhausted, onAddEvidence, onReVerify, onShowTerms }) {
+  const pct = confidencePct(verdictDetails?.confidence);
+  const termsLink = { background: "none", border: "none", padding: 0, color: c.accent, fontWeight: 600, cursor: "pointer", fontSize: "inherit", textDecoration: "underline" };
+
+  if (appealsExhausted) {
+    return (
+      <div style={{ marginTop: 14, padding: "18px 18px 16px", borderRadius: 14, border: `1px solid ${c.danger}55`, background: "linear-gradient(135deg, rgba(255,107,138,0.10), rgba(255,107,138,0.02))", animation: "cg-fadeup 500ms ease both" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          <div style={{ width: 30, height: 30, borderRadius: 99, background: c.danger, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <Icon name="x" size={15} color="#fff" />
+          </div>
+          <span style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 18, color: c.text }}>On-chain appeals exhausted</span>
+        </div>
+        <p style={{ margin: 0, fontSize: 13, color: c.textDim, lineHeight: 1.55 }}>
+          All {MAX_VERIFICATION_ATTEMPTS} verification attempts were used without validator consensus. The contract will not re-verify this deal again — funds stay locked until the dispute is resolved off-chain.
+        </p>
+        {verdictDetails?.reasoning && (
+          <p style={{ margin: "12px 0 0", fontSize: 12.5, color: c.textMute, lineHeight: 1.55, fontStyle: "italic", borderLeft: `2px solid ${c.danger}55`, paddingLeft: 10 }}>
+            Last verdict: {verdictDetails.reasoning}
+          </p>
+        )}
+        <div style={{ marginTop: 14, fontSize: 12.5, color: c.textDim, lineHeight: 1.55 }}>
+          Per the{" "}
+          <button onClick={onShowTerms} style={termsLink}>Terms &amp; Disclaimer</button>, unresolved disputes are settled by final and binding individual arbitration.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 14, padding: 16, borderRadius: 14, border: "1px solid rgba(255,181,71,0.40)", background: "rgba(255,181,71,0.07)", animation: "cg-fadeup 500ms ease both" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Icon name="spark" size={15} color={c.warn} />
+          <span style={{ fontWeight: 700, fontSize: 14, color: c.warn }}>Contested — no consensus</span>
+        </div>
+        <span style={{ fontSize: 11, color: c.textMute, fontVariantNumeric: "tabular-nums" }}>Attempt {attempts} of {MAX_VERIFICATION_ATTEMPTS}</span>
+      </div>
+      <div style={{ fontSize: 12, color: c.textDim, lineHeight: 1.55, marginBottom: 10 }}>
+        Validators could not agree on a verdict{typeof pct === "number" ? ` (low confidence · ${pct}%)` : ""}. Add stronger evidence, then re-request verification to break the tie.
+      </div>
+      {verdictDetails?.reasoning && (
+        <p style={{ margin: "0 0 12px", fontSize: 12.5, color: c.textMute, lineHeight: 1.55, fontStyle: "italic", borderLeft: "2px solid rgba(255,181,71,0.5)", paddingLeft: 10 }}>{verdictDetails.reasoning}</p>
+      )}
+      <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+        {Array.from({ length: MAX_VERIFICATION_ATTEMPTS }).map((_, i) => (
+          <span key={i} style={{ flex: 1, height: 4, borderRadius: 99, background: i < attempts ? c.warn : c.border }} />
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Btn kind="ghost" c={c} size="sm" icon="upload" style={{ flex: 1 }} onClick={onAddEvidence}>Add evidence</Btn>
+        <Btn kind="primary" c={c} size="sm" icon="spark" style={{ flex: 1 }} onClick={onReVerify}>Re-request verification</Btn>
+      </div>
+      <div style={{ marginTop: 8, fontSize: 11, color: c.textMute }}>
+        {attemptsLeft} {attemptsLeft === 1 ? "attempt" : "attempts"} remaining before appeals are exhausted.
+      </div>
+    </div>
+  );
+}
+
+// Evidence-strength meter — reflects how credibly a validator can read a link
+function StrengthMeter({ c, analysis }) {
+  if (!analysis || analysis.state === "empty") {
+    return <div style={{ fontSize: 11.5, color: c.textMute }}>Paste a public link to your proof — validators read the page text, so links beat screenshots.</div>;
+  }
+  if (analysis.state === "invalid") {
+    return <div style={{ fontSize: 12, color: c.danger, display: "flex", alignItems: "center", gap: 6 }}><Icon name="x" size={13} color={c.danger} />{analysis.reason}</div>;
+  }
+  const colorFor = { strong: c.success, medium: c.warn, weak: c.danger };
+  const col = colorFor[analysis.strength];
+  const segs = STRENGTH_META[analysis.strength]?.segments || 1;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 7, padding: "10px 12px", borderRadius: 10, border: `1px solid ${col}44`, background: `${col}0d` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", gap: 3 }}>
+          {[0, 1, 2].map((i) => (
+            <span key={i} style={{ width: 22, height: 5, borderRadius: 3, background: i < segs ? col : c.border }} />
+          ))}
+        </div>
+        <span style={{ fontSize: 12, fontWeight: 700, color: col }}>{STRENGTH_META[analysis.strength]?.label}</span>
+        <span style={{ flex: 1 }} />
+        <span style={{ fontSize: 11, color: c.textMute, fontFamily: "ui-monospace, monospace" }}>{analysis.category}</span>
+      </div>
+      <div style={{ fontSize: 11.5, color: c.textDim, lineHeight: 1.45 }}>{analysis.why}</div>
+    </div>
+  );
+}
+
 function EvidenceForm({ deal, walletAddress, provider, c, onSuccess, onCancel, toast }) {
   const [evType, setEvType]     = useState("delivery_proof");
   const [evUrl, setEvUrl]       = useState("");
   const [evDesc, setEvDesc]     = useState("");
-  const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const fileRef = useRef(null);
+
+  const analysis = useMemo(() => analyzeProofUrl(evUrl), [evUrl]);
+  const presets = PROOF_PRESETS[evType] || [];
 
   const inp = { background: c.bgElev, border: `1px solid ${c.border}`, borderRadius: 10, padding: "11px 14px", color: c.text, fontSize: 14, width: "100%", outline: "none", transition: "border-color 200ms" };
 
-  async function handleFileUpload(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    try {
-      validateImageFile(file);
-      setUploading(true);
-      const url = await uploadScreenshot(file);
-      setEvUrl(url);
-      toast("Screenshot uploaded", "success");
-    } catch (err) {
-      toast("Upload failed: " + err.message, "error");
-    } finally { setUploading(false); }
-  }
-
   async function handleSubmit() {
-    if (!evUrl.trim()) { toast("Provide an evidence URL or upload a screenshot", "error"); return; }
-    if (!evUrl.trim().startsWith("https://")) { toast("Evidence URL must start with https://", "error"); return; }
+    if (analysis.state !== "ok") { toast(analysis.reason || "Add a valid https:// proof link", "error"); return; }
     if (!evDesc.trim()) { toast("Add a short description", "error"); return; }
     try {
       setSubmitting(true);
@@ -709,36 +1167,40 @@ function EvidenceForm({ deal, walletAddress, provider, c, onSuccess, onCancel, t
           {EVIDENCE_TYPES.map((et) => <option key={et.value} value={et.value}>{et.label}</option>)}
         </select>
       </Field>
-      <Field c={c} label="Evidence URL">
-        <input value={evUrl} onChange={(e) => setEvUrl(e.target.value)} placeholder="https://tracking.carrier.com/... or imgbb URL" maxLength={2048} style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+
+      {presets.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: c.textMute }}>Best sources:</span>
+          {presets.map((p) => (
+            <span key={p} style={{ fontSize: 11, fontWeight: 600, color: c.accent, background: `${c.accent}14`, border: `1px solid ${c.accent}33`, padding: "3px 9px", borderRadius: 99 }}>{p}</span>
+          ))}
+        </div>
+      )}
+
+      <Field c={c} label="Proof Link (https://)">
+        <input value={evUrl} onChange={(e) => setEvUrl(e.target.value)} placeholder="https://www.fedex.com/track?... or an explorer / order link" maxLength={500} style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
       </Field>
-      <Field c={c} label="Upload Screenshot">
-        <input ref={fileRef} type="file" accept="image/*" onChange={handleFileUpload} style={{ display: "none" }} />
-        <button onClick={() => fileRef.current?.click()} disabled={uploading} style={{ ...inp, cursor: uploading ? "wait" : "pointer", textAlign: "left", border: `1px dashed ${c.border}`, color: c.textDim }}>
-          {uploading ? "Uploading…" : "📎 Choose image (JPEG / PNG / WebP, max 32MB)"}
-        </button>
-        {evUrl?.startsWith("https://i.ibb.co") && (
-          <div style={{ marginTop: 4, fontSize: 11, color: c.success }}>✓ Uploaded: <a href={evUrl} target="_blank" rel="noreferrer" style={{ color: c.accent }}>{evUrl}</a></div>
-        )}
-      </Field>
+
+      <StrengthMeter c={c} analysis={analysis} />
+
       <Field c={c} label="Description">
-        <textarea value={evDesc} onChange={(e) => setEvDesc(e.target.value)} placeholder="Brief description of what this evidence shows…" rows={3} maxLength={500} style={{ ...inp, resize: "vertical" }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+        <textarea value={evDesc} onChange={(e) => setEvDesc(e.target.value)} placeholder="What does this link show, and how does it satisfy the terms?" rows={3} maxLength={500} style={{ ...inp, resize: "vertical" }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
       </Field>
       <div style={{ display: "flex", gap: 10 }}>
         <Btn kind="ghost" c={c} onClick={onCancel} style={{ flex: 1 }}>Cancel</Btn>
-        <Btn kind="primary" c={c} onClick={handleSubmit} disabled={submitting} style={{ flex: 2 }}>{submitting ? "Submitting…" : "Submit On-Chain"}</Btn>
+        <Btn kind="primary" c={c} onClick={handleSubmit} disabled={submitting || analysis.state !== "ok"} style={{ flex: 2 }}>{submitting ? "Submitting…" : "Submit On-Chain"}</Btn>
       </div>
     </div>
   );
 }
 
-// ── Create deal dialog ────────────────────────────────────────
 function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toast }) {
   const [terms, setTerms]       = useState("");
   const [price, setPrice]       = useState("");
   const [deadline, setDeadline] = useState("");
   const [urls, setUrls]         = useState("");
   const [minSources, setMinSources] = useState(1);
+  const [collateral, setCollateral] = useState("");
   const [loading, setLoading]   = useState(false);
 
   const inp = { background: c.bg, border: `1px solid ${c.border}`, borderRadius: 10, padding: "11px 14px", color: c.text, fontSize: 14, width: "100%", outline: "none", transition: "border-color 200ms", fontFamily: "inherit" };
@@ -750,7 +1212,7 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
     try {
       setLoading(true);
       const urlArray = urls.split(",").map((u) => u.trim()).filter(Boolean);
-      await GL.createDeal(walletAddress, provider, { terms: terms.trim(), priceDescription: price.trim(), deadlineDescription: deadline.trim(), verificationUrls: urlArray, minSourcesRequired: minSources });
+      await GL.createDeal(walletAddress, provider, { terms: terms.trim(), priceDescription: price.trim(), deadlineDescription: deadline.trim(), verificationUrls: urlArray, minSourcesRequired: minSources, collateralWei: genToWei(collateral) });
       toast("Deal created on-chain", "success");
       onSuccess();
     } catch (err) {
@@ -765,7 +1227,7 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
       <div style={{ padding: "28px 32px 8px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <Icon name="plus" size={20} color={c.accent2} />
-          <Display c={c} size={28}>New escrow deal</Display>
+          <Display c={c} size={28} as="h2">New escrow deal</Display>
         </div>
         <p style={{ margin: "10px 0 0", color: c.textDim, fontSize: 14, maxWidth: 520 }}>Write your terms in plain English. Validators will read them exactly as-is.</p>
       </div>
@@ -807,10 +1269,31 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
             {minSources === 1 ? "Standard — any evidence that satisfies the terms" : `Multi-sig — AI must find confirmation from at least ${minSources} distinct sources`}
           </div>
         </div>
+
+        {/* Good-faith collateral */}
+        <div style={{ padding: 16, borderRadius: 12, border: `1px solid ${c.border}`, background: c.surface }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            <Icon name="shield" size={15} color={c.accent2} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: c.text }}>Good-faith collateral</span>
+            <span style={{ fontSize: 11, color: c.textMute }}>optional</span>
+          </div>
+          <p style={{ fontSize: 12, color: c.textDim, lineHeight: 1.5, marginBottom: 10 }}>
+            Post a bond and the buyer must match it. Both bonds return when the deal settles. If you fail to deliver — conditions unmet or deadline passed — your bond goes to the buyer. Skin in the game for both sides.
+          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <input value={collateral} onChange={(e) => setCollateral(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0" style={{ ...inp, width: 130 }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+            <span style={{ fontSize: 13, color: c.textDim, fontWeight: 600 }}>GEN bond each</span>
+          </div>
+          {parseFloat(collateral) > 0 && (
+            <div style={{ marginTop: 8, fontSize: 11.5, color: c.accent2 }}>
+              You&rsquo;ll lock {collateral} GEN now. Buyer locks {collateral} GEN on top of the price.
+            </div>
+          )}
+        </div>
       </div>
 
       <div style={{ padding: "18px 32px 28px", display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: `1px solid ${c.border}`, gap: 12 }}>
-        <span style={{ fontSize: 12, color: c.textMute }}>Deal visible to buyers immediately after creation</span>
+        <span style={{ fontSize: 12, color: c.textMute }}>{parseFloat(collateral) > 0 ? `Bonded deal · you lock ${collateral} GEN on creation` : "Deal visible to buyers immediately after creation"}</span>
         <div style={{ display: "flex", gap: 10 }}>
           <Btn kind="ghost" c={c} onClick={onClose}>Cancel</Btn>
           <Btn kind="primary" c={c} onClick={handleCreate} disabled={loading || !terms || !price || !deadline}>
@@ -822,14 +1305,12 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
   );
 }
 
-// ── Deal detail dialog ────────────────────────────────────────
-function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh, toast }) {
+function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh, toast, onShowTerms }) {
   const [showEvidenceForm, setShowEvidenceForm] = useState(false);
   const [showCounterForm, setShowCounterForm]   = useState(false);
   const [counterTermsInput, setCounterTermsInput] = useState("");
   const [fundAmt, setFundAmt] = useState("");
   const [txMsg, setTxMsg]     = useState(null);
-  // Verification animation state
   const [verifying, setVerifying]       = useState(false);
   const [verifyStage, setVerifyStage]   = useState(0);
   const [validators, setValidators]     = useState([]);
@@ -846,6 +1327,18 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
 
   let verdictDetails = null;
   try { verdictDetails = deal.verdict_details ? JSON.parse(deal.verdict_details) : null; } catch {}
+
+  let settlement = null;
+  try { settlement = deal.settlement ? JSON.parse(deal.settlement) : null; } catch {}
+
+  let fundedWei = 0n;
+  try { fundedWei = BigInt(deal.funded_amount || "0"); } catch {}
+  const isFunded = fundedWei > 0n;
+  const bond = hasCollateral(deal);
+
+  const attempts = parseInt(deal.verification_attempts || "0") || 0;
+  const attemptsLeft = Math.max(0, MAX_VERIFICATION_ATTEMPTS - attempts);
+  const appealsExhausted = attempts >= MAX_VERIFICATION_ATTEMPTS;
 
   async function tx(label, fn) {
     try {
@@ -865,7 +1358,6 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
     setVerifyStage(0);
     setValidators([]);
 
-    // Cycle visual stages while the real TX runs in background
     const timer = setInterval(() => {
       setVerifyStage((s) => {
         const next = Math.min(s + 1, VERIFY_STAGES.length - 1);
@@ -877,7 +1369,6 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
       });
     }, 18000);
 
-    // Stagger a couple fake validators
     setTimeout(() => setValidators(["VAL-A1"]), 8000);
     setTimeout(() => setValidators(["VAL-A1", "VAL-A2"]), 24000);
     setTimeout(() => setValidators(["VAL-A1", "VAL-A2", "VAL-B1"]), 40000);
@@ -904,19 +1395,18 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
     <Dialog c={c} onClose={onClose} wide>
       {txMsg && <TxOverlay msg={txMsg} c={c} />}
 
-      {/* Header */}
       <div style={{ padding: "24px 32px", borderBottom: `1px solid ${c.border}` }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
           <Pill c={c} tone={meta.tone}>{meta.label}</Pill>
           <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: c.textMute }}>Deal #{deal.id}</span>
           <span style={{ flex: 1 }} />
           {deal.price_description && (
-            <span style={{ fontFamily: "'Lineca', sans-serif", fontSize: 26, color: c.text, fontVariantNumeric: "tabular-nums" }}>{deal.price_description}</span>
+            <span style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 26, color: c.text, fontVariantNumeric: "tabular-nums" }}>{deal.price_description}</span>
           )}
         </div>
-        <Display c={c} size={24} style={{ marginBottom: 10 }}>{dealTitle(deal)}</Display>
+        <Display c={c} size={24} as="h2" style={{ marginBottom: 10 }}>{dealTitle(deal)}</Display>
         <p style={{ fontSize: 14, color: c.textDim, lineHeight: 1.6, maxWidth: 720, fontStyle: "italic", borderLeft: `2px solid ${c.borderHi}`, paddingLeft: 14 }}>
-          "{deal.terms}"
+          &ldquo;{deal.terms}&rdquo;
         </p>
         <div style={{ display: "flex", gap: 18, marginTop: 12, fontSize: 12, color: c.textMute, flexWrap: "wrap" }}>
           {deal.deadline_description && <span><Icon name="clock" size={11} /> {deal.deadline_description}</span>}
@@ -925,16 +1415,59 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
         </div>
       </div>
 
-      {/* Pipeline */}
       {isParty && (
         <div style={{ padding: "22px 32px", borderBottom: `1px solid ${c.border}` }}>
           <Pipeline c={c} status={status} />
         </div>
       )}
 
-      <div style={{ padding: "20px 32px 28px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 28 }}>
-        {/* Left: Evidence */}
+      <div className="cg-detail-grid" style={{ padding: "20px 32px 28px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 28 }}>
         <div>
+          {/* Auto on-chain payment proof — the chain is the receipt */}
+          {isFunded && (
+            <div style={{ marginBottom: 18, padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(91,227,164,0.4)", background: "linear-gradient(135deg, rgba(91,227,164,0.1), rgba(91,227,164,0.02))" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ width: 30, height: 30, borderRadius: 99, background: c.success, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: `0 0 14px ${c.success}77` }}>
+                  <Icon name="lock" size={15} color="#fff" />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: c.text }}>Payment locked on-chain</div>
+                  <div style={{ fontSize: 11.5, color: c.textDim }}>No receipt needed — the ledger is the proof.</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 20, color: c.text, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{fmtGen(deal.funded_amount)}</div>
+                  <div style={{ fontSize: 10, color: c.textMute, letterSpacing: "0.08em" }}>GEN ESCROW</div>
+                </div>
+              </div>
+              {CONTRACT && (
+                <a href={`${EXPLORER}${CONTRACT}`} target="_blank" rel="noreferrer" className="cg-link-underline" style={{ display: "inline-flex", alignItems: "center", gap: 5, marginTop: 10, fontSize: 11.5, color: c.accent }}>
+                  <Icon name="link" size={11} />View on GenLayer explorer
+                </a>
+              )}
+            </div>
+          )}
+
+          {/* Collateral / good-faith bond status */}
+          {bond && (
+            <div style={{ marginBottom: 18, padding: "14px 16px", borderRadius: 12, border: `1px solid ${c.accent}40`, background: `${c.accent}0c` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <Icon name="shield" size={15} color={c.accent2} />
+                <span style={{ fontSize: 13, fontWeight: 700, color: c.text }}>Good-faith bond · {fmtGen(deal.collateral_amount)} GEN each</span>
+              </div>
+              {settlement ? (
+                <div style={{ fontSize: 12, color: c.textDim, lineHeight: 1.5 }}>
+                  {(settlement.seller_collateral === "split_buyer_protocol" || settlement.seller_collateral === "slashed_to_buyer")
+                    ? `Seller did not deliver — their bond was split: ${fmtGen(settlement.seller_collateral_to_buyer || deal.collateral_amount)} GEN to the buyer, the rest retained by the protocol.`
+                    : "Both bonds were returned to their owners."}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: c.textDim, lineHeight: 1.5 }}>
+                  {isFunded ? "Both parties are bonded. Bonds return in full on settlement. If the deal is rejected or expires, the seller's bond is split 50/50 — half to the buyer, half retained by the protocol." : "Seller has posted their bond. The buyer matches it when funding."}
+                </div>
+              )}
+            </div>
+          )}
+
           <SectionLabel c={c}>Evidence ({evidence.length})</SectionLabel>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
@@ -968,7 +1501,7 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
               <SectionLabel c={c}>Verification URLs</SectionLabel>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
                 {(Array.isArray(deal.verification_urls) ? deal.verification_urls : deal.verification_urls.split(",")).filter(Boolean).map((u, i) => (
-                  <a key={i} href={u.trim()} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: c.accent, textDecoration: "none", background: c.surface, padding: "4px 10px", borderRadius: 99, border: `1px solid ${c.border}` }}>
+                  <a key={i} href={u.trim()} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: c.accent, background: c.surface, padding: "4px 10px", borderRadius: 99, border: `1px solid ${c.border}` }}>
                     <Icon name="link" size={11} />{u.trim().slice(0, 32)}{u.trim().length > 32 ? "…" : ""}
                   </a>
                 ))}
@@ -977,30 +1510,28 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
           )}
         </div>
 
-        {/* Right: Verification / verdict / actions */}
         <div>
-          <SectionLabel c={c}>{verdictDetails ? "Verdict" : verifying ? "AI consensus in progress" : "Actions"}</SectionLabel>
+          <SectionLabel c={c}>{status === "disputed" ? "Appeal" : verdictDetails ? "Verdict" : verifying ? "AI consensus in progress" : "Actions"}</SectionLabel>
 
-          {/* Verification running */}
           {verifying && <VerifyingState c={c} stage={verifyStage} validators={validators} />}
+          {!verifying && verdictDetails && status !== "disputed" && <VerdictPanel c={c} verdictDetails={verdictDetails} />}
 
-          {/* Verdict */}
-          {!verifying && verdictDetails && <VerdictPanel c={c} verdictDetails={verdictDetails} deal={deal} />}
-
-          {/* Actions (not verifying, no verdict override) */}
           {!verifying && (
             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: verdictDetails ? 16 : 12 }}>
 
-              {/* Disputed banner */}
               {status === "disputed" && isParty && (
-                <div style={{ padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(255,181,71,0.35)", background: "rgba(255,181,71,0.06)", marginBottom: 4 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13, color: c.warn, marginBottom: 6 }}>Validators in disagreement</div>
-                  <div style={{ fontSize: 12, color: c.textDim, lineHeight: 1.55, marginBottom: 12 }}>Submit additional evidence, then re-request verification to resolve.</div>
-                  <Btn kind="primary" c={c} icon="spark" onClick={runVerification}>Re-request Verification</Btn>
-                </div>
+                <AppealPanel
+                  c={c}
+                  verdictDetails={verdictDetails}
+                  attempts={attempts}
+                  attemptsLeft={attemptsLeft}
+                  appealsExhausted={appealsExhausted}
+                  onAddEvidence={() => setShowEvidenceForm(true)}
+                  onReVerify={runVerification}
+                  onShowTerms={() => { onShowTerms?.(); }}
+                />
               )}
 
-              {/* Multi-sig badge */}
               {deal.min_sources_required && parseInt(deal.min_sources_required) > 1 && (
                 <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 10, border: `1px solid ${c.accent}33`, background: `${c.accent}08`, fontSize: 12, color: c.textDim }}>
                   <Icon name="shield" size={13} color={c.accent} />
@@ -1008,23 +1539,31 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
                 </div>
               )}
 
-              {/* Fund form */}
               {status === "open" && !isSeller && walletAddress && (
                 <div>
                   <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600, marginBottom: 8 }}>Fund this deal</div>
-                  <div style={{ fontSize: 12, color: c.textDim, marginBottom: 8 }}>Amount in GEN</div>
+                  <div style={{ fontSize: 12, color: c.textDim, marginBottom: 8 }}>{bond ? "Escrow price in GEN" : "Amount in GEN"}</div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <input value={fundAmt} onChange={(e) => setFundAmt(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="e.g. 1.5" style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
-                    <Btn kind="primary" c={c} disabled={!fundAmt || parseFloat(fundAmt) <= 0} onClick={() => { const wei = BigInt(Math.round(parseFloat(fundAmt || "0") * 1e18)); tx("Funding deal…", () => GL.fundDeal(walletAddress, provider, parseInt(deal.id), wei.toString())); }}>Fund</Btn>
+                    <Btn kind="primary" c={c} disabled={!fundAmt || parseFloat(fundAmt) <= 0} onClick={() => {
+                      const priceWei = BigInt(genToWei(fundAmt));
+                      const total = priceWei + BigInt(deal.collateral_amount || "0");
+                      tx("Funding deal…", () => GL.fundDeal(walletAddress, provider, parseInt(deal.id), total.toString()));
+                    }}>{bond ? "Fund + bond" : "Fund"}</Btn>
                   </div>
+                  {bond && (
+                    <div style={{ marginTop: 8, fontSize: 11.5, color: c.textDim, lineHeight: 1.5, padding: "8px 10px", borderRadius: 8, background: `${c.accent}0c`, border: `1px solid ${c.accent}26` }}>
+                      You&rsquo;ll lock <strong style={{ color: c.text }}>{fundAmt || "0"} GEN</strong> price + <strong style={{ color: c.text }}>{fmtGen(deal.collateral_amount)} GEN</strong> bond ={" "}
+                      <strong style={{ color: c.accent2 }}>{(parseFloat(fundAmt || "0") + parseFloat(fmtGen(deal.collateral_amount))).toString()} GEN</strong> total.
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* Counter-terms: seller sees pending proposal */}
               {deal.pending_terms && isSeller && (
                 <div style={{ padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(255,181,71,0.35)", background: "rgba(255,181,71,0.06)" }}>
                   <div style={{ fontWeight: 700, fontSize: 13, color: c.warn, marginBottom: 6 }}>Amendment Proposed</div>
-                  <p style={{ fontSize: 12, color: c.textDim, lineHeight: 1.55, fontStyle: "italic", borderLeft: "2px solid rgba(255,181,71,0.5)", paddingLeft: 10, marginBottom: 8 }}>"{deal.pending_terms}"</p>
+                  <p style={{ fontSize: 12, color: c.textDim, lineHeight: 1.55, fontStyle: "italic", borderLeft: "2px solid rgba(255,181,71,0.5)", paddingLeft: 10, marginBottom: 8 }}>&ldquo;{deal.pending_terms}&rdquo;</p>
                   <div style={{ fontSize: 11, color: c.textMute, marginBottom: 10 }}>From: <span style={{ fontFamily: "ui-monospace, monospace" }}>{shortAddr(deal.pending_terms_from)}</span></div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <Btn kind="success" c={c} size="sm" icon="check" style={{ flex: 1 }} onClick={() => tx("Accepting counter-terms…", () => GL.acceptCounterTerms(walletAddress, provider, parseInt(deal.id)))}>Accept</Btn>
@@ -1033,19 +1572,16 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
                 </div>
               )}
 
-              {/* Counter-terms: proposer awaiting */}
               {deal.pending_terms && !isSeller && walletAddress?.toLowerCase() === deal.pending_terms_from?.toLowerCase() && (
                 <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${c.accent}33`, background: `${c.accent}08`, fontSize: 12, color: c.textDim }}>
                   <span style={{ color: c.accent, fontWeight: 600 }}>Your counter-terms are pending seller review.</span>
                 </div>
               )}
 
-              {/* Counter-terms: propose button */}
               {!deal.pending_terms && !isSeller && ["open", "funded"].includes(status) && walletAddress && !showCounterForm && (
                 <Btn kind="ghost" c={c} size="sm" style={{ width: "100%" }} onClick={() => setShowCounterForm(true)}>Propose Counter-terms</Btn>
               )}
 
-              {/* Counter-terms form */}
               {showCounterForm && (
                 <div style={{ padding: 14, background: c.surface, border: `1px solid ${c.border}`, borderRadius: 12 }}>
                   <SectionLabel c={c}>Your Counter-terms</SectionLabel>
@@ -1057,27 +1593,22 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
                 </div>
               )}
 
-              {/* Request AI verification */}
               {status === "evidence_submitted" && isSeller && (
                 <Btn kind="primary" c={c} icon="spark" onClick={runVerification}>Run AI Verification</Btn>
               )}
 
-              {/* Deadline check */}
               {["funded", "evidence_submitted"].includes(status) && isParty && (
                 <Btn kind="ghost" c={c} size="sm" icon="clock" onClick={() => tx("Checking deadline…", () => GL.checkDeadline(walletAddress, provider, parseInt(deal.id)))}>Check Deadline</Btn>
               )}
 
-              {/* Settle */}
               {status === "verified" && isParty && (
-                <Btn kind="success" c={c} icon="check" onClick={() => tx("Settling deal…", () => GL.settleDeal(walletAddress, provider, parseInt(deal.id)))}>Settle & Release Funds</Btn>
+                <Btn kind="success" c={c} icon="check" onClick={() => tx("Settling deal…", () => GL.settleDeal(walletAddress, provider, parseInt(deal.id)))}>Settle &amp; Release Funds</Btn>
               )}
 
-              {/* Refund */}
               {status === "rejected" && isBuyer && (
                 <Btn kind="danger" c={c} icon="x" onClick={() => tx("Claiming refund…", () => GL.claimRefund(walletAddress, provider, parseInt(deal.id)))}>Claim Refund</Btn>
               )}
 
-              {/* Cancel */}
               {status === "open" && isSeller && (
                 <Btn kind="danger" c={c} onClick={() => tx("Cancelling deal…", () => GL.cancelDeal(walletAddress, provider, parseInt(deal.id)))}>Cancel Deal</Btn>
               )}
@@ -1099,8 +1630,7 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
   );
 }
 
-// ── Deal card ─────────────────────────────────────────────────
-function DealCard({ deal, walletAddress, c, index = 0, onOpen }) {
+function DealCard({ deal, walletAddress, c, onOpen }) {
   const status  = deal.status || "open";
   const meta    = STATUS_META[status] || STATUS_META.open;
   const isAddr  = (a) => a && walletAddress && a.toLowerCase() === walletAddress.toLowerCase();
@@ -1109,47 +1639,48 @@ function DealCard({ deal, walletAddress, c, index = 0, onOpen }) {
   const title   = dealTitle(deal);
 
   return (
-    <div style={{ animation: `cg-fadeup 600ms ${80 * index}ms ease both` }}>
-      <Card c={c} hover onClick={() => onOpen(deal)} style={{ cursor: "pointer", position: "relative", overflow: "hidden" }}>
-        {/* Corner accent dot */}
-        <div style={{ position: "absolute", top: 14, right: 14, width: 8, height: 8, borderRadius: 99, background: meta.tone === "verifying" ? c.accent2 : (meta.tone === "funded" || meta.tone === "released") ? c.success : c.textMute, boxShadow: meta.tone === "verifying" ? `0 0 10px ${c.accent2}` : "none" }} />
+    <Card c={c} hover onClick={() => onOpen(deal)} style={{ cursor: "pointer", position: "relative", overflow: "hidden", height: "100%" }}>
+      <div style={{ position: "absolute", top: 14, right: 14, width: 8, height: 8, borderRadius: 99, background: meta.tone === "verifying" ? c.accent2 : (meta.tone === "funded" || meta.tone === "released") ? c.success : c.textMute, boxShadow: meta.tone === "verifying" ? `0 0 10px ${c.accent2}` : "none" }} />
 
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-          <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: c.textMute }}>#{deal.id}</span>
-          <span style={{ flex: 1 }} />
-          <Pill c={c} tone={meta.tone}>{meta.label}</Pill>
-          {(isSeller || isBuyer) && (
-            <span style={{ fontSize: 10, color: c.accent, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", background: `${c.accent}18`, padding: "3px 7px", borderRadius: 99 }}>
-              {isSeller ? "Your deal" : "Buyer"}
-            </span>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+        <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: c.textMute }}>#{deal.id}</span>
+        <span style={{ flex: 1 }} />
+        {hasCollateral(deal) && (
+          <span title="Good-faith bond" style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: c.accent2, fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase", background: `${c.accent2}15`, padding: "3px 7px", borderRadius: 99 }}>
+            <Icon name="shield" size={10} color={c.accent2} />Bonded
+          </span>
+        )}
+        <Pill c={c} tone={meta.tone}>{meta.label}</Pill>
+        {(isSeller || isBuyer) && (
+          <span style={{ fontSize: 10, color: c.accent, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", background: `${c.accent}18`, padding: "3px 7px", borderRadius: 99 }}>
+            {isSeller ? "Your deal" : "Buyer"}
+          </span>
+        )}
+      </div>
+
+      <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: c.text, letterSpacing: "-0.01em", lineHeight: 1.3 }}>{title}</h3>
+      <p style={{ margin: "8px 0 0", fontSize: 13, color: c.textDim, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{deal.terms}</p>
+
+      <div style={{ height: 1, background: c.border, margin: "16px 0 14px" }} />
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div>
+          {deal.price_description && (
+            <>
+              <div style={{ fontSize: 10, color: c.textMute, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600 }}>Amount</div>
+              <div style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 22, color: c.text, lineHeight: 1, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>{deal.price_description}</div>
+            </>
           )}
         </div>
-
-        <h3 style={{ margin: 0, fontSize: 17, fontWeight: 600, color: c.text, letterSpacing: "-0.01em", lineHeight: 1.3 }}>{title}</h3>
-        <p style={{ margin: "8px 0 0", fontSize: 13, color: c.textDim, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{deal.terms}</p>
-
-        <div style={{ height: 1, background: c.border, margin: "16px 0 14px" }} />
-
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            {deal.price_description && (
-              <>
-                <div style={{ fontSize: 10, color: c.textMute, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600 }}>Amount</div>
-                <div style={{ fontFamily: "'Lineca', sans-serif", fontSize: 22, color: c.text, lineHeight: 1, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>{deal.price_description}</div>
-              </>
-            )}
-          </div>
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 10, color: c.textMute, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600 }}>Seller</div>
-            <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: c.textDim, marginTop: 4 }}>{shortAddr(deal.seller)}</div>
-          </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontSize: 10, color: c.textMute, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600 }}>Seller</div>
+          <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: c.textDim, marginTop: 4 }}>{shortAddr(deal.seller)}</div>
         </div>
-      </Card>
-    </div>
+      </div>
+    </Card>
   );
 }
 
-// ── Segmented tabs ────────────────────────────────────────────
 function SegmentedControl({ c, options, value, onChange }) {
   return (
     <div style={{ display: "inline-flex", padding: 4, borderRadius: 99, background: c.surface, border: `1px solid ${c.border}` }}>
@@ -1162,57 +1693,23 @@ function SegmentedControl({ c, options, value, onChange }) {
   );
 }
 
-// ── Tweaks panel ──────────────────────────────────────────────
-function TweaksPanel({ c, tweaks, setTweak, onClose }) {
-  return (
-    <div style={{ position: "fixed", bottom: 24, right: 24, zIndex: 300, width: 280, background: c.bgElev, border: `1px solid ${c.border}`, borderRadius: 14, boxShadow: c.shadow, animation: "cg-fadeup 280ms ease both" }}>
-      <div style={{ display: "flex", alignItems: "center", padding: "12px 14px", borderBottom: `1px solid ${c.border}` }}>
-        <span style={{ fontFamily: "'Lineca', sans-serif", fontSize: 14, color: c.text }}>Tweaks</span>
-        <span style={{ flex: 1 }} />
-        <button onClick={onClose} style={{ background: "none", border: "none", color: c.textMute, cursor: "pointer" }}><Icon name="x" size={14} /></button>
-      </div>
-      <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 14 }}>
-        <div>
-          <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 8, fontWeight: 600 }}>Accent lead</div>
-          <div style={{ display: "flex", gap: 6 }}>
-            {[{ id: "pink", c1: "#E37DF7", c2: "#9B6AF6" }, { id: "purple", c1: "#9B6AF6", c2: "#110FFF" }, { id: "blue", c1: "#110FFF", c2: "#282B5D" }].map((opt) => (
-              <button key={opt.id} onClick={() => setTweak("accentLead", opt.id)} style={{ flex: 1, padding: 0, height: 36, borderRadius: 8, border: tweaks.accentLead === opt.id ? `2px solid ${c.text}` : `1px solid ${c.border}`, background: `linear-gradient(135deg, ${opt.c1}, ${opt.c2})`, cursor: "pointer", color: "#fff", fontSize: 11, fontWeight: 600, textTransform: "capitalize" }}>
-                {opt.id}
-              </button>
-            ))}
-          </div>
-        </div>
-        <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-          <input type="checkbox" checked={tweaks.reduceMotion} onChange={(e) => setTweak("reduceMotion", e.target.checked)} style={{ accentColor: c.accent2 }} />
-          <span style={{ fontSize: 13, color: c.textDim }}>Reduce motion</span>
-        </label>
-      </div>
-    </div>
-  );
-}
-
 // ══════════════════════════════════════════════════════════════
 // MAIN APP
 // ══════════════════════════════════════════════════════════════
 export default function ClauseGuardApp() {
   const [dark, setDark] = useState(true);
-  const [tweaks, setTweaksState] = useState({ accentLead: "pink", reduceMotion: false });
+  const [reduceMotion, setReduceMotion] = useState(false);
 
-  const cBase = T[dark ? "dark" : "light"];
-  const c = useMemo(() => {
-    if (tweaks.accentLead === "blue")   return { ...cBase, accent2: cBase.accent3, accent: cBase.accent2 };
-    if (tweaks.accentLead === "purple") return { ...cBase, accent2: cBase.accent, accent: cBase.accent3 };
-    return cBase;
-  }, [cBase, tweaks.accentLead]);
-
-  const setTweak = (k, v) => setTweaksState((p) => ({ ...p, [k]: v }));
+  const c = T[dark ? "dark" : "light"];
 
   const { open } = useAppKit();
   const { address: walletAddress } = useAppKitAccount();
   const { walletProvider: provider } = useAppKitProvider("eip155");
   const { disconnect } = useDisconnect();
   const walletLoading = false;
-  const [showTweaks, setShowTweaks]       = useState(false);
+
+  const [accepted, setAccepted] = useState(true); // assume accepted until we read storage (avoids SSR flash)
+  const [showTerms, setShowTerms] = useState(false);
 
   const [deals, setDeals]             = useState([]);
   const [dealsLoading, setDealsLoading] = useState(true);
@@ -1225,11 +1722,22 @@ export default function ClauseGuardApp() {
 
   const { toasts, add: toast } = useToast();
 
-  // ── Wallet ──────────────────────────────────────────────────
+  // ── First-visit acceptance gate ─────────────────────────────
+  useEffect(() => {
+    try {
+      const ok = localStorage.getItem("cg_terms_accepted_v1");
+      if (!ok) setAccepted(false);
+      if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) setReduceMotion(true);
+    } catch {}
+  }, []);
+  const acceptTerms = useCallback(() => {
+    try { localStorage.setItem("cg_terms_accepted_v1", new Date().toISOString()); } catch {}
+    setAccepted(true);
+  }, []);
+
   const connectWallet = useCallback(() => open(), [open]);
   const disconnectWallet = useCallback(() => disconnect(), [disconnect]);
 
-  // ── Load deals ──────────────────────────────────────────────
   const loadDeals = useCallback(async () => {
     try {
       setDealsLoading(true);
@@ -1240,11 +1748,10 @@ export default function ClauseGuardApp() {
       setDealsError(err.message);
       toast("Failed to load deals: " + err.message, "error");
     } finally { setDealsLoading(false); }
-  }, []);
+  }, [toast]);
 
   useEffect(() => { loadDeals(); }, [loadDeals]);
 
-  // ── Filter ──────────────────────────────────────────────────
   const filteredDeals = deals.filter((d) => {
     const tabMatch = tab === "mine"
       ? walletAddress && (d.seller?.toLowerCase() === walletAddress.toLowerCase() || d.buyer?.toLowerCase() === walletAddress.toLowerCase())
@@ -1256,34 +1763,42 @@ export default function ClauseGuardApp() {
   });
 
   return (
-    <div className={tweaks.reduceMotion ? "cg-rm" : ""} style={{ minHeight: "100vh", background: c.bg, color: c.text }}>
+    <div className={reduceMotion ? "cg-rm" : ""} style={{ minHeight: "100vh", background: c.bg, color: c.text }}>
       <GlobalStyles dark={dark} />
 
       <Header c={c} dark={dark} onToggleTheme={() => setDark((d) => !d)} walletAddress={walletAddress} walletLoading={walletLoading} onConnect={connectWallet} onDisconnect={disconnectWallet} onCreate={() => walletAddress ? setShowCreate(true) : connectWallet()} onRefresh={loadDeals} />
 
       <Hero c={c} dark={dark} deals={deals} onCreateClick={() => setShowCreate(true)} onConnectClick={connectWallet} walletAddress={walletAddress} />
 
-      <main id="deals" style={{ maxWidth: 1280, margin: "0 auto", padding: "56px 28px 120px" }}>
-        {/* Section header */}
-        <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 32, gap: 16, flexWrap: "wrap" }}>
-          <div>
-            <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.16em", textTransform: "uppercase", fontWeight: 600, marginBottom: 10 }}>Escrow deals</div>
-            <Display c={c} size={40}>{tab === "mine" ? "My deals" : tab === "open" ? "Open marketplace" : "Active escrow"}</Display>
-          </div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <input type="search" placeholder="Search deals…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ background: c.surface, border: `1px solid ${c.border}`, borderRadius: 99, padding: "8px 16px", color: c.text, fontSize: 13, outline: "none", width: 200, fontFamily: "inherit", transition: "border-color 200ms" }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
-            <SegmentedControl c={c} options={[["all", "All"], ["open", "Open"], ["mine", "Mine"]]} value={tab} onChange={setTab} />
-          </div>
-        </div>
+      <Marquee c={c} dark={dark} />
 
-        {/* Loading */}
+      <HowItWorks c={c} />
+
+      <TrustBand c={c} dark={dark} />
+
+      <main id="deals" style={{ maxWidth: 1280, margin: "0 auto", padding: "100px 28px 120px" }}>
+        <Reveal>
+          <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 36, gap: 16, flexWrap: "wrap" }}>
+            <div>
+              <SectionLabel c={c} style={{ marginBottom: 12 }}>003 / Marketplace</SectionLabel>
+              <Display c={c} size={44} as="h2">{tab === "mine" ? "My deals" : tab === "open" ? "Open marketplace" : "Active escrow"}</Display>
+            </div>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+                <span style={{ position: "absolute", left: 14, color: c.textMute, pointerEvents: "none" }}><Icon name="search" size={14} /></span>
+                <input type="search" placeholder="Search deals…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ background: c.surface, border: `1px solid ${c.border}`, borderRadius: 99, padding: "8px 16px 8px 36px", color: c.text, fontSize: 13, outline: "none", width: 210, fontFamily: "inherit", transition: "border-color 200ms" }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
+              </div>
+              <SegmentedControl c={c} options={[["all", "All"], ["open", "Open"], ["mine", "Mine"]]} value={tab} onChange={setTab} />
+            </div>
+          </div>
+        </Reveal>
+
         {dealsLoading && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 18 }}>
             {[0, 1, 2].map((i) => <SkeletonCard key={i} c={c} />)}
           </div>
         )}
 
-        {/* Error */}
         {dealsError && !dealsLoading && (
           <div style={{ background: `${c.danger}18`, border: `1px solid ${c.danger}44`, borderRadius: 14, padding: "24px 28px", marginBottom: 20 }}>
             <div style={{ fontWeight: 700, color: c.danger, marginBottom: 6 }}>Failed to load deals</div>
@@ -1292,87 +1807,89 @@ export default function ClauseGuardApp() {
           </div>
         )}
 
-        {/* Empty */}
         {!dealsLoading && !dealsError && filteredDeals.length === 0 && (
-          <div style={{ textAlign: "center", padding: "80px 24px", background: c.surface, borderRadius: 18, border: `1px solid ${c.border}` }}>
+          <div style={{ textAlign: "center", padding: "80px 24px", background: c.surface, borderRadius: 20, border: `1px solid ${c.border}` }}>
             <ClauseGuardMark size={52} animated={false} />
             <h3 style={{ fontSize: 20, fontWeight: 700, color: c.text, margin: "20px 0 10px" }}>
               {tab === "mine" ? "No deals yet" : tab === "open" ? "No open deals" : "No deals on-chain yet"}
             </h3>
             <p style={{ fontSize: 14, color: c.textMute, marginBottom: 24 }}>
-              {tab === "mine" ? "Create your first deal to get started." : "Be the first to create a deal."}
+              {tab === "mine" ? "Create your first deal to get started." : "Be the first to write a clause."}
             </p>
             {walletAddress && <Btn kind="primary" c={c} icon="plus" onClick={() => setShowCreate(true)}>Create a deal</Btn>}
           </div>
         )}
 
-        {/* Deal grid */}
         {!dealsLoading && !dealsError && filteredDeals.length > 0 && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 18 }}>
             {filteredDeals.slice().reverse().map((deal, i) => (
-              <DealCard key={deal.id} deal={deal} walletAddress={walletAddress} c={c} index={i} onOpen={setOpenDeal} />
+              <Reveal key={deal.id} delay={Math.min(i, 6) * 70}>
+                <DealCard deal={deal} walletAddress={walletAddress} c={c} onOpen={setOpenDeal} />
+              </Reveal>
             ))}
           </div>
         )}
-
-        {/* How it works */}
-        <section style={{ marginTop: 96 }}>
-          <div style={{ textAlign: "center", maxWidth: 680, margin: "0 auto 56px" }}>
-            <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.16em", textTransform: "uppercase", fontWeight: 600, marginBottom: 12 }}>How it works</div>
-            <Display c={c} size={48}>Trust without intermediaries.</Display>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18 }}>
-            {[
-              { n: "01", t: "Write the clause",  d: "In plain English. No legalese, no smart-contract syntax. Validators read what you wrote — verbatim." },
-              { n: "02", t: "Lock funds",         d: "Escrowed on the GenLayer studionet chain. Visible to both parties, untouchable until AI consensus." },
-              { n: "03", t: "AI consensus",       d: "Validators crawl the open web, reason over the evidence, and reach a verdict in minutes via Optimistic Democracy." },
-            ].map((step) => (
-              <Card key={step.n} c={c} hover>
-                <div style={{ fontFamily: "'Lineca', sans-serif", fontSize: 42, color: c.accent2, lineHeight: 1, marginBottom: 16, opacity: 0.85 }}>{step.n}</div>
-                <h3 style={{ margin: 0, fontSize: 18, color: c.text, fontWeight: 600, letterSpacing: "-0.01em" }}>{step.t}</h3>
-                <p style={{ margin: "10px 0 0", fontSize: 14, color: c.textDim, lineHeight: 1.55 }}>{step.d}</p>
-              </Card>
-            ))}
-          </div>
-        </section>
       </main>
 
-      {/* Mochi */}
-      <div style={{ maxWidth: 1280, margin: "0 auto", padding: "0 28px 32px", display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
-        <div style={{ position: "relative", animation: tweaks.reduceMotion ? "none" : "cg-driftA 6s ease-in-out infinite" }}>
-          <div aria-hidden style={{ position: "absolute", inset: -20, borderRadius: "50%", background: `radial-gradient(circle, ${c.accent2}55 0%, transparent 65%)`, filter: "blur(24px)", pointerEvents: "none" }} />
+      {/* Mochi mascot moment */}
+      <div style={{ maxWidth: 1280, margin: "0 auto", padding: "0 28px 40px", display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
+        <div style={{ position: "relative", animation: reduceMotion ? "none" : "cg-bob 5s ease-in-out infinite" }}>
+          <div aria-hidden style={{ position: "absolute", inset: -24, borderRadius: "50%", background: `radial-gradient(circle, ${c.accent2}55 0%, transparent 65%)`, filter: "blur(26px)", pointerEvents: "none" }} />
           <Mochi size={140} />
-          <div style={{ position: "absolute", top: 8, right: -178, width: 158, background: c.bgElev, border: `1px solid ${c.borderHi}`, borderRadius: 14, padding: "10px 14px", fontSize: 12, color: c.textDim, lineHeight: 1.4, boxShadow: c.shadow }}>
-            <span style={{ color: c.text, fontWeight: 700 }}>Mochi</span> here — your friendly escrow validator. Trust is autonomous now.
+          <div style={{ position: "absolute", top: 8, right: -186, width: 168, background: c.bgElev, border: `1px solid ${c.borderHi}`, borderRadius: 14, padding: "11px 15px", fontSize: 12, color: c.textDim, lineHeight: 1.45, boxShadow: c.shadow }}>
+            <span style={{ color: c.text, fontWeight: 700 }}>Mochi</span> here — your friendly escrow validator. I read the evidence so you don&rsquo;t have to argue.
             <div style={{ position: "absolute", left: -7, top: 18, width: 12, height: 12, background: c.bgElev, borderLeft: `1px solid ${c.borderHi}`, borderBottom: `1px solid ${c.borderHi}`, transform: "rotate(45deg)" }} />
           </div>
         </div>
-        <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.16em", textTransform: "uppercase", fontWeight: 600 }}>Built on GenLayer · Intelligent Contracts + Optimistic Democracy</div>
+        <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.16em", textTransform: "uppercase", fontWeight: 600, textAlign: "center" }}>Built on GenLayer · Intelligent Contracts + Optimistic Democracy</div>
       </div>
 
-      <footer style={{ borderTop: `1px solid ${c.border}`, padding: "24px 28px", display: "flex", alignItems: "center", justifyContent: "space-between", maxWidth: 1280, margin: "0 auto", flexWrap: "wrap", gap: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, color: c.textMute, fontSize: 12 }}>
-          <ClauseGuardMark size={18} animated={false} />
-          <span>ClauseGuard · built on GenLayer studionet ·{" "}
-            <a href={`https://explorer-studio.genlayer.com/address/${process.env.NEXT_PUBLIC_CONTRACT_ADDRESS}`} target="_blank" rel="noreferrer" style={{ color: c.accent, fontFamily: "ui-monospace, monospace", textDecoration: "none" }}>
-              {process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ? shortAddr(process.env.NEXT_PUBLIC_CONTRACT_ADDRESS) : "not configured"}
-            </a>
-          </span>
+      {/* Footer */}
+      <footer style={{ borderTop: `1px solid ${c.border}`, marginTop: 20 }}>
+        <div style={{ maxWidth: 1280, margin: "0 auto", padding: "32px 28px", display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 24 }}>
+          <div style={{ maxWidth: 420 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+              <ClauseGuardMark size={22} animated={false} />
+              <span style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 15, color: c.text }}>clauseguard</span>
+            </div>
+            <p style={{ fontSize: 12.5, color: c.textMute, lineHeight: 1.6 }}>
+              Experimental, non-custodial P2P escrow on GenLayer studionet. ClauseGuard is not a law firm and provides no legal or financial advice. AI verdicts are not legally binding. Use at your own risk — see the{" "}
+              <button onClick={() => setShowTerms(true)} className="cg-link-underline" style={{ background: "none", border: "none", color: c.accent, fontSize: 12.5, padding: 0, cursor: "pointer", fontWeight: 600 }}>Terms &amp; Disclaimer</button>.
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 56, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+              <SectionLabel c={c} style={{ marginBottom: 4 }}>Product</SectionLabel>
+              <a href="#deals" className="cg-link-underline" style={{ fontSize: 13, color: c.textDim }}>Deals</a>
+              <a href="#how" className="cg-link-underline" style={{ fontSize: 13, color: c.textDim }}>How it works</a>
+              <a href="#trust" className="cg-link-underline" style={{ fontSize: 13, color: c.textDim }}>Trust model</a>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+              <SectionLabel c={c} style={{ marginBottom: 4 }}>On-chain</SectionLabel>
+              <a href={`https://explorer-studio.genlayer.com/address/${process.env.NEXT_PUBLIC_CONTRACT_ADDRESS}`} target="_blank" rel="noreferrer" className="cg-link-underline" style={{ fontSize: 13, color: c.textDim, fontFamily: "ui-monospace, monospace" }}>{process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ? shortAddr(process.env.NEXT_PUBLIC_CONTRACT_ADDRESS) : "Contract"}</a>
+              <a href="https://genlayer.com" target="_blank" rel="noreferrer" className="cg-link-underline" style={{ fontSize: 13, color: c.textDim }}>GenLayer</a>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+              <SectionLabel c={c} style={{ marginBottom: 4 }}>Legal</SectionLabel>
+              <button onClick={() => setShowTerms(true)} className="cg-link-underline" style={{ fontSize: 13, color: c.textDim, background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}>Terms &amp; Disclaimer</button>
+            </div>
+          </div>
         </div>
-        <div style={{ display: "flex", gap: 18, fontSize: 12, color: c.textMute }}>
-          <a href={`https://explorer-studio.genlayer.com/address/${process.env.NEXT_PUBLIC_CONTRACT_ADDRESS}`} target="_blank" rel="noreferrer" style={{ color: "inherit", textDecoration: "none" }}>Explorer</a>
-          <a href="https://genlayer.com" target="_blank" rel="noreferrer" style={{ color: "inherit", textDecoration: "none" }}>GenLayer</a>
-          <button onClick={() => setShowTweaks((p) => !p)} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: 12, padding: 0 }}>Tweaks</button>
+        <div style={{ borderTop: `1px solid ${c.border}` }}>
+          <div style={{ maxWidth: 1280, margin: "0 auto", padding: "16px 28px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, fontSize: 11.5, color: c.textMute }}>
+            <span>© {new Date().getFullYear()} ClauseGuard · Built on GenLayer</span>
+            <span>studionet · testnet</span>
+          </div>
         </div>
       </footer>
 
       {/* Modals */}
+      {!accepted && <AcceptanceGate c={c} onAccept={acceptTerms} onReadFull={() => setShowTerms(true)} />}
+      {showTerms && <TermsDialog c={c} onClose={() => setShowTerms(false)} />}
       {showCreate && <CreateDealDialog c={c} walletAddress={walletAddress} provider={provider} toast={toast} onClose={() => setShowCreate(false)} onSuccess={async () => { setShowCreate(false); await loadDeals(); }} />}
-      {openDeal   && <DealDetailDialog c={c} deal={openDeal} walletAddress={walletAddress} provider={provider} toast={toast} onClose={() => setOpenDeal(null)} onRefresh={loadDeals} />}
+      {openDeal   && <DealDetailDialog c={c} deal={openDeal} walletAddress={walletAddress} provider={provider} toast={toast} onClose={() => setOpenDeal(null)} onRefresh={loadDeals} onShowTerms={() => { setOpenDeal(null); setShowTerms(true); }} />}
 
       <ToastStack toasts={toasts} c={c} />
-
-      {showTweaks && <TweaksPanel c={c} tweaks={tweaks} setTweak={setTweak} onClose={() => setShowTweaks(false)} />}
     </div>
   );
 }
