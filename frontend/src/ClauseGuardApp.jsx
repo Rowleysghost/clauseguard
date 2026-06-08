@@ -57,17 +57,17 @@ const T = {
 // NOTE: replace [JURISDICTION] with your actual governing-law jurisdiction.
 const LEGAL = {
   updated: "June 2026",
-  jurisdiction: "[JURISDICTION — e.g. Delaware, USA]",
+  jurisdiction: "[JURISDICTION, e.g. Delaware, USA]",
   intro:
     "ClauseGuard is experimental, non-custodial software for peer-to-peer escrow on the GenLayer network. Before you use it, please read and accept the following.",
   sections: [
     {
       h: "Not legal or financial advice",
-      b: "ClauseGuard is software, not a law firm, broker, or financial institution. The verdicts produced by GenLayer's AI validators are automated assessments generated from public evidence — they are not legally binding judgments and do not constitute legal, financial, tax, or investment advice. Nothing here replaces a separately enforceable written agreement or a qualified professional. For anything that matters, consult a lawyer and keep your own contract.",
+      b: "ClauseGuard is software, not a law firm, broker, or financial institution. The verdicts produced by GenLayer's AI validators are automated assessments generated from public evidence. They are not legally binding judgments and do not constitute legal, financial, tax, or investment advice. Nothing here replaces a separately enforceable written agreement or a qualified professional. For anything that matters, consult a lawyer and keep your own contract.",
     },
     {
       h: "No liability for loss of funds",
-      b: "You use ClauseGuard entirely at your own risk. To the maximum extent permitted by law, ClauseGuard, its contributors, and GenLayer disclaim all warranties and accept no liability for any loss or damage — including loss of funds, tokens, or data — arising from smart-contract bugs, AI validator error or disagreement, network or chain failures, wallet or key mistakes, mis-written deal terms, third-party services, or unauthorized access. The software is provided “as is” and “as available.”",
+      b: "You use ClauseGuard entirely at your own risk. To the maximum extent permitted by law, ClauseGuard, its contributors, and GenLayer disclaim all warranties and accept no liability for any loss or damage (including loss of funds, tokens, or data) arising from smart-contract bugs, AI validator error or disagreement, network or chain failures, wallet or key mistakes, mis-written deal terms, third-party services, or unauthorized access. The software is provided “as is” and “as available.”",
     },
     {
       h: "Dispute resolution & governing law",
@@ -545,7 +545,7 @@ function ValidatorRing({ c, active = true, mark = 36 }) {
 
 // ── Featured deal visual ──────────────────────────────────────
 function FeaturedDealVis({ c, dark, deal }) {
-  const title   = deal ? dealTitle(deal) : "Vintage Leica M6 — Hong Kong → Berlin";
+  const title   = deal ? dealTitle(deal) : "Vintage Leica M6, Hong Kong → Berlin";
   const amount  = deal ? deal.price_description : "2,400 GEN";
   const status  = deal ? deal.status : "evidence_submitted";
   const meta    = STATUS_META[status] || STATUS_META.open;
@@ -829,7 +829,7 @@ function Hero({ c, dark, deals, onCreateClick, onConnectClick, walletAddress }) 
           </Display>
 
           <p style={{ maxWidth: 530, marginTop: 24, fontSize: 18, lineHeight: 1.6, color: c.textDim }}>
-            Write your deal in plain words. Lock the funds on-chain. A network of AI validators reads the evidence, agrees on the truth, and releases &mdash; or refunds &mdash; on its own. No middleman holding your money.
+            Write your deal in plain words. Lock the funds on-chain. A network of AI validators reads the evidence, agrees on the truth, and either releases the funds or refunds them on its own. No middleman holding your money.
           </p>
 
           <div style={{ display: "flex", gap: 12, marginTop: 34, flexWrap: "wrap" }}>
@@ -888,7 +888,7 @@ function Marquee({ c, dark }) {
 // ── How it works ──────────────────────────────────────────────
 function HowItWorks({ c }) {
   const steps = [
-    { n: "01", icon: "pen",    t: "Write the clause", d: "In plain English. No legalese, no smart-contract syntax. The validators read exactly what you wrote — word for word." },
+    { n: "01", icon: "pen",    t: "Write the clause", d: "In plain English. No legalese, no smart-contract syntax. The validators read exactly what you wrote, word for word." },
     { n: "02", icon: "lock",   t: "Lock the funds",   d: "Escrowed on the GenLayer studionet chain. Visible to both parties, untouchable by either, until AI consensus decides." },
     { n: "03", icon: "spark",  t: "AI reaches a verdict", d: "Validators crawl the open web, reason over the evidence, and agree on an outcome in minutes via Optimistic Democracy." },
   ];
@@ -901,7 +901,7 @@ function HowItWorks({ c }) {
             <Display c={c} size={52} as="h2" style={{ maxWidth: 560 }}>Trust without the middleman.</Display>
           </div>
           <p style={{ maxWidth: 360, fontSize: 15, color: c.textDim, lineHeight: 1.65 }}>
-            Three steps from handshake to settlement. The hard part &mdash; deciding who&rsquo;s right &mdash; is handled by a transparent network of AI arbiters, not a company.
+            Three steps from handshake to settlement. The hard part, deciding who&rsquo;s right, is handled by a transparent network of AI arbiters, not a company.
           </p>
         </div>
       </Reveal>
@@ -929,7 +929,7 @@ function TrustBand({ c, dark }) {
   const points = [
     { t: "A diverse network, not one judge", d: "Many independent AI validators each reach their own conclusion. No single model, company, or person decides your outcome." },
     { t: "Evidence from the open web", d: "Validators crawl the verification URLs and public sources you provide, then reason over what they find." },
-    { t: "Optimistic Democracy", d: "Validators converge on a verdict. Disagreement triggers re-review and appeal — settlement only happens on consensus." },
+    { t: "Optimistic Democracy", d: "Validators converge on a verdict. Disagreement triggers re-review and appeal. Settlement only happens on consensus." },
   ];
   return (
     <section id="trust" style={{ position: "relative", overflow: "hidden", borderTop: `1px solid ${c.border}`, borderBottom: `1px solid ${c.border}`, background: dark ? "rgba(155,106,246,0.03)" : "rgba(155,106,246,0.04)" }}>
@@ -1062,7 +1062,7 @@ function AppealPanel({ c, verdictDetails, attempts, attemptsLeft, appealsExhaust
           <span style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 18, color: c.text }}>On-chain appeals exhausted</span>
         </div>
         <p style={{ margin: 0, fontSize: 13, color: c.textDim, lineHeight: 1.55 }}>
-          All {MAX_VERIFICATION_ATTEMPTS} verification attempts were used without validator consensus. The contract will not re-verify this deal again — funds stay locked until the dispute is resolved off-chain.
+          All {MAX_VERIFICATION_ATTEMPTS} verification attempts were used without validator consensus. The contract will not re-verify this deal again. Funds stay locked until the dispute is resolved off-chain.
         </p>
         {verdictDetails?.reasoning && (
           <p style={{ margin: "12px 0 0", fontSize: 12.5, color: c.textMute, lineHeight: 1.55, fontStyle: "italic", borderLeft: `2px solid ${c.danger}55`, paddingLeft: 10 }}>
@@ -1082,7 +1082,7 @@ function AppealPanel({ c, verdictDetails, attempts, attemptsLeft, appealsExhaust
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Icon name="spark" size={15} color={c.warn} />
-          <span style={{ fontWeight: 700, fontSize: 14, color: c.warn }}>Contested — no consensus</span>
+          <span style={{ fontWeight: 700, fontSize: 14, color: c.warn }}>Contested · no consensus</span>
         </div>
         <span style={{ fontSize: 11, color: c.textMute, fontVariantNumeric: "tabular-nums" }}>Attempt {attempts} of {MAX_VERIFICATION_ATTEMPTS}</span>
       </div>
@@ -1111,7 +1111,7 @@ function AppealPanel({ c, verdictDetails, attempts, attemptsLeft, appealsExhaust
 // Evidence-strength meter — reflects how credibly a validator can read a link
 function StrengthMeter({ c, analysis }) {
   if (!analysis || analysis.state === "empty") {
-    return <div style={{ fontSize: 11.5, color: c.textMute }}>Paste a public link to your proof — validators read the page text, so links beat screenshots.</div>;
+    return <div style={{ fontSize: 11.5, color: c.textMute }}>Paste a public link to your proof. Validators read the page text, so links beat screenshots.</div>;
   }
   if (analysis.state === "invalid") {
     return <div style={{ fontSize: 12, color: c.danger, display: "flex", alignItems: "center", gap: 6 }}><Icon name="x" size={13} color={c.danger} />{analysis.reason}</div>;
@@ -1250,13 +1250,13 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
           </Field>
         </div>
 
-        <Field c={c} label="Verification URLs (comma-separated — validators crawl these)">
+        <Field c={c} label="Verification URLs (comma-separated, validators crawl these)">
           <input value={urls} onChange={(e) => setUrls(e.target.value)} placeholder="https://track.dhl.com/123, https://yoursite.com/order/456" maxLength={2048} style={inp} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
         </Field>
 
         <div>
           <div style={{ fontSize: 11, color: c.textMute, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600, marginBottom: 8 }}>
-            Min. verification sources <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>— require {minSources} independent source{minSources > 1 ? "s" : ""}</span>
+            Min. verification sources <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(require {minSources} independent source{minSources > 1 ? "s" : ""})</span>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             {[1, 2, 3].map((n) => (
@@ -1266,7 +1266,7 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
             ))}
           </div>
           <div style={{ marginTop: 6, fontSize: 11, color: c.textMute }}>
-            {minSources === 1 ? "Standard — any evidence that satisfies the terms" : `Multi-sig — AI must find confirmation from at least ${minSources} distinct sources`}
+            {minSources === 1 ? "Standard: any evidence that satisfies the terms" : `Multi-sig: AI must find confirmation from at least ${minSources} distinct sources`}
           </div>
         </div>
 
@@ -1278,7 +1278,7 @@ function CreateDealDialog({ c, walletAddress, provider, onClose, onSuccess, toas
             <span style={{ fontSize: 11, color: c.textMute }}>optional</span>
           </div>
           <p style={{ fontSize: 12, color: c.textDim, lineHeight: 1.5, marginBottom: 10 }}>
-            Post a bond and the buyer must match it. Both bonds return when the deal settles. If you fail to deliver — conditions unmet or deadline passed — your bond goes to the buyer. Skin in the game for both sides.
+            Post a bond and the buyer must match it. Both bonds return when the deal settles. If you fail to deliver (conditions unmet or deadline passed), your bond goes to the buyer. Skin in the game for both sides.
           </p>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <input value={collateral} onChange={(e) => setCollateral(e.target.value.replace(/[^0-9.]/g, ""))} placeholder="0.0" style={{ ...inp, width: 130 }} onFocus={(e) => (e.target.style.borderColor = c.borderHi)} onBlur={(e) => (e.target.style.borderColor = c.border)} />
@@ -1432,7 +1432,7 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: c.text }}>Payment locked on-chain</div>
-                  <div style={{ fontSize: 11.5, color: c.textDim }}>No receipt needed — the ledger is the proof.</div>
+                  <div style={{ fontSize: 11.5, color: c.textDim }}>No receipt needed. The ledger is the proof.</div>
                 </div>
                 <div style={{ textAlign: "right" }}>
                   <div style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 20, color: c.text, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{fmtGen(deal.funded_amount)}</div>
@@ -1457,12 +1457,12 @@ function DealDetailDialog({ c, deal, walletAddress, provider, onClose, onRefresh
               {settlement ? (
                 <div style={{ fontSize: 12, color: c.textDim, lineHeight: 1.5 }}>
                   {(settlement.seller_collateral === "split_buyer_protocol" || settlement.seller_collateral === "slashed_to_buyer")
-                    ? `Seller did not deliver — their bond was split: ${fmtGen(settlement.seller_collateral_to_buyer || deal.collateral_amount)} GEN to the buyer, the rest retained by the protocol.`
+                    ? `Seller did not deliver, so their bond was split: ${fmtGen(settlement.seller_collateral_to_buyer || deal.collateral_amount)} GEN to the buyer, the rest retained by the protocol.`
                     : "Both bonds were returned to their owners."}
                 </div>
               ) : (
                 <div style={{ fontSize: 12, color: c.textDim, lineHeight: 1.5 }}>
-                  {isFunded ? "Both parties are bonded. Bonds return in full on settlement. If the deal is rejected or expires, the seller's bond is split 50/50 — half to the buyer, half retained by the protocol." : "Seller has posted their bond. The buyer matches it when funding."}
+                  {isFunded ? "Both parties are bonded. Bonds return in full on settlement. If the deal is rejected or expires, the seller's bond is split 50/50: half to the buyer, half retained by the protocol." : "Seller has posted their bond. The buyer matches it when funding."}
                 </div>
               )}
             </div>
@@ -1837,7 +1837,7 @@ export default function ClauseGuardApp() {
           <div aria-hidden style={{ position: "absolute", inset: -24, borderRadius: "50%", background: `radial-gradient(circle, ${c.accent2}55 0%, transparent 65%)`, filter: "blur(26px)", pointerEvents: "none" }} />
           <Mochi size={140} />
           <div style={{ position: "absolute", top: 8, right: -186, width: 168, background: c.bgElev, border: `1px solid ${c.borderHi}`, borderRadius: 14, padding: "11px 15px", fontSize: 12, color: c.textDim, lineHeight: 1.45, boxShadow: c.shadow }}>
-            <span style={{ color: c.text, fontWeight: 700 }}>Mochi</span> here — your friendly escrow validator. I read the evidence so you don&rsquo;t have to argue.
+            <span style={{ color: c.text, fontWeight: 700 }}>Mochi</span> here, your friendly escrow validator. I read the evidence so you don&rsquo;t have to argue.
             <div style={{ position: "absolute", left: -7, top: 18, width: 12, height: 12, background: c.bgElev, borderLeft: `1px solid ${c.borderHi}`, borderBottom: `1px solid ${c.borderHi}`, transform: "rotate(45deg)" }} />
           </div>
         </div>
@@ -1853,7 +1853,7 @@ export default function ClauseGuardApp() {
               <span style={{ fontFamily: "'Lineca', sans-serif", fontWeight: 700, fontSize: 15, color: c.text }}>clauseguard</span>
             </div>
             <p style={{ fontSize: 12.5, color: c.textMute, lineHeight: 1.6 }}>
-              Experimental, non-custodial P2P escrow on GenLayer studionet. ClauseGuard is not a law firm and provides no legal or financial advice. AI verdicts are not legally binding. Use at your own risk — see the{" "}
+              Experimental, non-custodial P2P escrow on GenLayer studionet. ClauseGuard is not a law firm and provides no legal or financial advice. AI verdicts are not legally binding. Use at your own risk. See the{" "}
               <button onClick={() => setShowTerms(true)} className="cg-link-underline" style={{ background: "none", border: "none", color: c.accent, fontSize: 12.5, padding: 0, cursor: "pointer", fontWeight: 600 }}>Terms &amp; Disclaimer</button>.
             </p>
           </div>

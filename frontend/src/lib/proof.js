@@ -9,7 +9,7 @@
 const SOURCES = [
   {
     strength: "strong", category: "On-chain payment",
-    why: "Cryptographically verifiable on a public ledger — effectively impossible to forge.",
+    why: "Cryptographically verifiable on a public ledger, so it's effectively impossible to forge.",
     patterns: [/etherscan\.io/, /explorer[.-].*genlayer/, /genlayer.*explorer/, /blockscout/, /arbiscan\.io/, /polygonscan\.com/, /basescan\.org/, /solscan\.io/, /bscscan\.com/, /optimistic\.etherscan/],
   },
   {
@@ -24,7 +24,7 @@ const SOURCES = [
   },
   {
     strength: "medium", category: "Payment receipt",
-    why: "Hosted receipt from a recognised processor — credible, but account-controlled.",
+    why: "Hosted receipt from a recognised processor, credible but account-controlled.",
     patterns: [/stripe\.com/, /paypal\./, /squareup\.com/, /wise\.com/, /revolut\./, /receipt/, /invoice/],
   },
   {
