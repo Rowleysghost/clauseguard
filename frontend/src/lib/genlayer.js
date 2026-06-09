@@ -19,11 +19,28 @@ async function waitForTx(writeClient, hash) {
   const receipt = await writeClient.waitForTransactionReceipt({
     hash,
     status: TransactionStatus.ACCEPTED,
-    fullTransaction: false,
+    fullTransaction: true, // need the leader receipt to read the GenVM result
     retries: 60,
     interval: 2000,
   });
-  if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) throw new Error("Transaction failed on-chain");
+  // A GenLayer tx can reach ACCEPTED while its contract call reverted: the
+  // GenVM result lives both at the top level (txExecutionResultName, which can
+  // lag) and inside the leader receipt (populated at ACCEPTED — this is what
+  // the explorer's "GENVM RESULT" column reads). Check both so a reverted call
+  // never reports success, and surface the on-chain error message.
+  const leader =
+    receipt?.consensusData?.leader_receipt ?? receipt?.consensus_data?.leader_receipt;
+  const leaderReceipt = Array.isArray(leader) ? leader[0] : leader;
+  const leaderResult = leaderReceipt?.execution_result;
+  const errored =
+    receipt?.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR ||
+    leaderResult === "FINISHED_WITH_ERROR" ||
+    leaderResult === "ERROR";
+  if (errored) {
+    const stderr = leaderReceipt?.genvm_result?.stderr || "";
+    const tail = stderr ? `: ${stderr.trim().split("\n").pop().trim()}` : "";
+    throw new Error(`Transaction reverted on-chain${tail}`);
+  }
   return receipt;
 }
 

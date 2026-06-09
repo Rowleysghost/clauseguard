@@ -112,7 +112,7 @@ class ClauseGuard(gl.Contract):
 
         deal = {
             "id": str(deal_id),
-            "seller": str(gl.message.sender),
+            "seller": str(gl.message.sender_address),
             "buyer": "",
             "terms": terms,
             "price_description": price_description,
@@ -134,7 +134,7 @@ class ClauseGuard(gl.Contract):
         }
 
         self.deals[deal_id] = json.dumps(deal)
-        self._add_user_deal(gl.message.sender, deal_id)
+        self._add_user_deal(gl.message.sender_address, deal_id)
 
         return deal_id
 
@@ -149,7 +149,7 @@ class ClauseGuard(gl.Contract):
         if deal["status"] != "open":
             gl.rollback("Deal is not open for funding")
 
-        if str(gl.message.sender) == deal["seller"]:
+        if str(gl.message.sender_address) == deal["seller"]:
             gl.rollback("Seller cannot fund their own deal")
 
         # Reject zero-value funding — a 0-wei buyer would block the buyer slot
@@ -172,7 +172,7 @@ class ClauseGuard(gl.Contract):
             deal["buyer_collateral"] = "0"
             deal["funded_amount"] = str(value)
 
-        deal["buyer"] = str(gl.message.sender)
+        deal["buyer"] = str(gl.message.sender_address)
         deal["status"] = "funded"
 
         # Funding invalidates any pending counter-terms proposed before a buyer
@@ -181,7 +181,7 @@ class ClauseGuard(gl.Contract):
         deal["pending_terms_from"] = ""
 
         self.deals[deal_id] = json.dumps(deal)
-        self._add_user_deal(gl.message.sender, deal_id)
+        self._add_user_deal(gl.message.sender_address, deal_id)
 
     @gl.public.write
     def submit_evidence(self, deal_id: u256, evidence_type: str, evidence_url: str, description: str):
@@ -199,7 +199,7 @@ class ClauseGuard(gl.Contract):
         if deal["status"] not in ("funded", "evidence_submitted", "disputed"):
             gl.rollback("Deal must be funded before evidence can be submitted")
 
-        sender = str(gl.message.sender)
+        sender = str(gl.message.sender_address)
         if sender != deal["seller"] and sender != deal["buyer"]:
             gl.rollback("Only deal parties can submit evidence")
 
@@ -247,7 +247,7 @@ class ClauseGuard(gl.Contract):
         if deal["status"] not in ("evidence_submitted", "disputed"):
             gl.rollback("Evidence must be submitted before verification")
 
-        sender = str(gl.message.sender)
+        sender = str(gl.message.sender_address)
         if sender != deal["seller"] and sender != deal["buyer"]:
             gl.rollback("Only deal parties can request verification")
 
@@ -403,7 +403,7 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         if deal["status"] not in ("open", "funded"):
             gl.rollback("Counter-terms can only be proposed for open or funded deals")
 
-        sender = str(gl.message.sender)
+        sender = str(gl.message.sender_address)
         if sender == deal["seller"]:
             gl.rollback("Seller cannot propose counter-terms to their own deal")
 
@@ -439,7 +439,7 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         if not deal.get("pending_terms", ""):
             gl.rollback("No pending counter-terms to accept")
 
-        sender = str(gl.message.sender)
+        sender = str(gl.message.sender_address)
         if sender != deal["seller"]:
             gl.rollback("Only the seller can accept counter-terms")
 
@@ -470,7 +470,7 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         if not deal.get("pending_terms", ""):
             gl.rollback("No pending counter-terms to reject")
 
-        sender = str(gl.message.sender)
+        sender = str(gl.message.sender_address)
         if sender != deal["seller"]:
             gl.rollback("Only the seller can reject counter-terms")
 
@@ -492,7 +492,7 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         if deal["status"] not in ("funded", "evidence_submitted"):
             gl.rollback("Deadline can only be checked for funded deals")
 
-        sender = str(gl.message.sender)
+        sender = str(gl.message.sender_address)
         if sender != deal["seller"] and sender != deal["buyer"]:
             gl.rollback("Only deal parties can check the deadline")
 
@@ -569,7 +569,7 @@ Respond with ONLY a valid JSON object:
         if deal["status"] != "verified":
             gl.rollback("Deal must be verified before settlement")
 
-        sender = str(gl.message.sender)
+        sender = str(gl.message.sender_address)
         if sender != deal["seller"] and sender != deal["buyer"]:
             gl.rollback("Only deal parties can settle")
 
@@ -600,7 +600,7 @@ Respond with ONLY a valid JSON object:
         if deal["status"] != "rejected":
             gl.rollback("Deal must be rejected to claim refund")
 
-        sender = str(gl.message.sender)
+        sender = str(gl.message.sender_address)
         if sender != deal["buyer"]:
             gl.rollback("Only buyer can claim refund")
 
@@ -617,7 +617,7 @@ Respond with ONLY a valid JSON object:
         seller_to_buyer = seller_bond // 2
         seller_to_protocol = seller_bond - seller_to_buyer
         # In production:
-        # gl.transfer(gl.message.sender, u256(int(deal["funded_amount"]) + buyer_bond + seller_to_buyer))
+        # gl.transfer(gl.message.sender_address, u256(int(deal["funded_amount"]) + buyer_bond + seller_to_buyer))
         # seller_to_protocol stays in the contract (protocol-retained / burned)
 
         deal["status"] = "refunded"
@@ -640,7 +640,7 @@ Respond with ONLY a valid JSON object:
         if deal["status"] != "open":
             gl.rollback("Can only cancel open (unfunded) deals")
 
-        sender = str(gl.message.sender)
+        sender = str(gl.message.sender_address)
         if sender != deal["seller"]:
             gl.rollback("Only seller can cancel their deal")
 
@@ -687,9 +687,10 @@ Respond with ONLY a valid JSON object:
     def get_user_deals(self, user_address: Address) -> str:
         """Returns JSON array of deal IDs for a given user."""
         try:
-            return self.user_deals[user_address]
+            raw = self.user_deals[user_address]
         except KeyError:
-            return "[]"
+            raw = ""
+        return raw if raw else "[]"
 
     @gl.public.view
     def get_open_deals(self, offset: u256, limit: u256) -> str:
@@ -715,16 +716,20 @@ Respond with ONLY a valid JSON object:
     def _get_deal(self, deal_id: u256) -> dict:
         """Load and parse a deal from storage."""
         try:
-            return json.loads(self.deals[deal_id])
+            raw = self.deals[deal_id]
         except KeyError:
+            raw = ""
+        if not raw:
             gl.rollback("Deal not found")
+        return json.loads(raw)
 
     def _add_user_deal(self, user: Address, deal_id: u256):
         """Track deal ID in user's deal history (capped to prevent bloat)."""
         try:
-            deals_list = json.loads(self.user_deals[user])
+            raw = self.user_deals[user]
         except KeyError:
-            deals_list = []
+            raw = ""
+        deals_list = json.loads(raw) if raw else []
         # Cap per-user history so a spammy user can't blow up their own
         # user_deals JSON to the point where reads/writes are unaffordable.
         if len(deals_list) >= MAX_DEALS_PER_USER:
