@@ -1,8 +1,13 @@
 import { ImageResponse } from "next/og";
 
-export const alt = "ClauseGuard: escrow that reads English";
+export const alt = "ClauseGuard: escrow, witnessed by machines";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
+
+const PAPER = "#F2EDE3";
+const INK = "#1C1A15";
+const SEAL = "#C8401F";
+const FADED = "#6B655A";
 
 export default function OpengraphImage() {
   return new ImageResponse(
@@ -10,38 +15,51 @@ export default function OpengraphImage() {
       <div
         style={{
           height: "100%", width: "100%", display: "flex", flexDirection: "column",
-          justifyContent: "space-between", background: "#050510", padding: "72px 80px",
-          fontFamily: "sans-serif", position: "relative",
+          justifyContent: "space-between", background: PAPER, padding: "60px 76px 48px",
+          fontFamily: "Georgia, serif", position: "relative",
         }}
       >
-        {/* gradient glow */}
-        <div style={{ position: "absolute", top: -160, right: -120, width: 620, height: 620, borderRadius: 9999, background: "radial-gradient(circle at center, rgba(227,125,247,0.55), rgba(17,15,255,0))", display: "flex" }} />
-        {/* top: wordmark */}
-        <div style={{ display: "flex", alignItems: "center" }}>
-          <div style={{ width: 46, height: 46, borderRadius: 13, background: "linear-gradient(135deg, #E37DF7, #110FFF)", display: "flex" }} />
-          <div style={{ marginLeft: 18, color: "#ffffff", fontSize: 30, fontWeight: 700, letterSpacing: -1 }}>clauseguard</div>
-        </div>
-        {/* middle: headline */}
+        {/* red margin line */}
+        <div style={{ position: "absolute", top: 0, bottom: 0, left: 52, width: 3, background: "rgba(200,64,31,0.35)", display: "flex" }} />
+        {/* top: filing strip + double rule */}
         <div style={{ display: "flex", flexDirection: "column" }}>
-          <div style={{ display: "flex", color: "#ffffff", fontSize: 88, fontWeight: 800, letterSpacing: -3, lineHeight: 1.02 }}>Escrow that</div>
-          <div
-            style={{
-              display: "flex", fontSize: 88, fontWeight: 800, letterSpacing: -3, lineHeight: 1.05,
-              color: "transparent", backgroundImage: "linear-gradient(110deg, #E37DF7, #9B6AF6, #110FFF)",
-              backgroundClip: "text", WebkitBackgroundClip: "text",
-            }}
-          >
-            reads English.
+          <div style={{ display: "flex", justifyContent: "space-between", color: FADED, fontSize: 18, letterSpacing: 4, fontFamily: "monospace" }}>
+            <div style={{ display: "flex" }}>FORM CG-1 · DEED OF ESCROW</div>
+            <div style={{ display: "flex" }}>RECORDED ON GENLAYER</div>
           </div>
-          <div style={{ display: "flex", marginTop: 26, color: "#b3b3d4", fontSize: 30, maxWidth: 860, lineHeight: 1.4 }}>
-            Plain-English deals, funds locked on-chain, released by a network of AI validators.
+          <div style={{ display: "flex", flexDirection: "column", marginTop: 14 }}>
+            <div style={{ height: 5, background: INK, display: "flex" }} />
+            <div style={{ height: 2, background: INK, marginTop: 3, display: "flex" }} />
           </div>
         </div>
-        {/* bottom: footer */}
-        <div style={{ display: "flex", alignItems: "center", color: "#6d6e96", fontSize: 24, fontWeight: 600 }}>
-          <div style={{ display: "flex" }}>Built on GenLayer</div>
-          <div style={{ display: "flex", margin: "0 14px" }}>·</div>
-          <div style={{ display: "flex" }}>AI escrow on studionet</div>
+        {/* middle: headline + stamp */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", flexDirection: "column", maxWidth: 760 }}>
+            <div style={{ display: "flex", color: INK, fontSize: 92, fontWeight: 700, letterSpacing: -3, lineHeight: 1.02 }}>Escrow,</div>
+            <div style={{ display: "flex", fontSize: 92, fontWeight: 700, letterSpacing: -3, lineHeight: 1.05, color: SEAL, fontStyle: "italic" }}>
+              witnessed
+            </div>
+            <div style={{ display: "flex", color: INK, fontSize: 92, fontWeight: 700, letterSpacing: -3, lineHeight: 1.05 }}>by machines.</div>
+            <div style={{ display: "flex", marginTop: 24, color: FADED, fontSize: 26, maxWidth: 700, lineHeight: 1.45 }}>
+              Plain-English deals, funds locked on-chain, released by a tribunal of AI validators.
+            </div>
+          </div>
+          {/* seal + stamp */}
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+            <div style={{ display: "flex", width: 220, height: 220, borderRadius: 9999, border: `5px solid ${SEAL}`, alignItems: "center", justifyContent: "center" }}>
+              <div style={{ display: "flex", width: 168, height: 168, borderRadius: 9999, border: `2px solid ${SEAL}`, alignItems: "center", justifyContent: "center", color: SEAL, fontSize: 88, fontWeight: 700 }}>
+                C¶
+              </div>
+            </div>
+            <div style={{ display: "flex", marginTop: 30, transform: "rotate(-8deg)", border: `6px solid ${SEAL}`, color: SEAL, padding: "10px 22px", fontSize: 28, fontWeight: 700, letterSpacing: 4, fontFamily: "monospace" }}>
+              AI-ARBITRATED
+            </div>
+          </div>
+        </div>
+        {/* bottom: signature line */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderTop: `2px solid ${INK}`, paddingTop: 18 }}>
+          <div style={{ display: "flex", alignItems: "center", color: INK, fontSize: 26, fontWeight: 700 }}>ClauseGuard — The Machine Notary</div>
+          <div style={{ display: "flex", color: FADED, fontSize: 20, fontFamily: "monospace", letterSpacing: 2 }}>STUDIONET · TESTNET</div>
         </div>
       </div>
     ),

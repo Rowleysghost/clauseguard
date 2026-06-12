@@ -2,12 +2,12 @@ import { headers } from "next/headers";
 import ContextProvider from "../context";
 
 const SITE_URL = "https://clauseguard-zeta.vercel.app";
-const TITLE = "ClauseGuard: escrow that reads English";
+const TITLE = "ClauseGuard: escrow, witnessed by machines";
 const DESCRIPTION =
-  "AI-powered P2P trade escrow on GenLayer. Write deal terms in plain English, lock funds on-chain, and let a network of AI validators release or refund autonomously.";
+  "AI-powered P2P trade escrow on GenLayer. Write deal terms in plain English, lock funds on-chain, and let a tribunal of AI validators release or refund autonomously.";
 
 export const viewport = {
-  themeColor: "#050510",
+  themeColor: "#F2EDE3",
 };
 
 export const metadata = {
