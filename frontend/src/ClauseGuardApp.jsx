@@ -48,10 +48,9 @@ const SANS  = "'Supreme', 'Helvetica Neue', system-ui, sans-serif";
 const MONO  = "'Fragment Mono', ui-monospace, 'SFMono-Regular', monospace";
 
 // ── Legal / disclaimer content ────────────────────────────────
-// NOTE: replace [JURISDICTION] with your actual governing-law jurisdiction.
 const LEGAL = {
   updated: "June 2026",
-  jurisdiction: "[JURISDICTION, e.g. Delaware, USA]",
+  jurisdiction: "Delaware, USA",
   intro:
     "ClauseGuard is experimental, non-custodial software for peer-to-peer escrow on the GenLayer network. Before you use it, please read and accept the following.",
   sections: [
@@ -65,7 +64,7 @@ const LEGAL = {
     },
     {
       h: "Dispute resolution & governing law",
-      b: "Any dispute, claim, or controversy arising out of or relating to ClauseGuard or these terms shall be resolved exclusively by final and binding individual arbitration, and not in court. You and ClauseGuard each waive the right to a jury trial and the right to participate in any class, collective, or representative action. These terms are governed by, and construed in accordance with, the laws of [JURISDICTION], without regard to its conflict-of-law rules.",
+      b: "Any dispute, claim, or controversy arising out of or relating to ClauseGuard or these terms shall be resolved exclusively by final and binding individual arbitration, and not in court. You and ClauseGuard each waive the right to a jury trial and the right to participate in any class, collective, or representative action. These terms are governed by, and construed in accordance with, the laws of the State of Delaware, USA, without regard to its conflict-of-law rules.",
     },
   ],
 };
