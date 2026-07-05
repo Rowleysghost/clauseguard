@@ -36,6 +36,10 @@ Every loop in the contract walks data a caller can grow. Pre-fix every loop was 
 | L5 | `get_all_deals` | same | Same as L4, returns *all* statuses | Paginated `get_all_deals(offset, limit)` |
 | L6 | `submit_evidence` parse+append | `evidence_list` | Each call re-parses & re-serializes; without a cap, list grows to MB and griefs every subsequent call on the same deal | `MAX_EVIDENCE_ITEMS = 50` + per-field length caps |
 | L7 | `_add_user_deal` (implicit list growth) | `user_deals[user]` | A spammy user blows up their *own* `user_deals` JSON until reads/writes are unaffordable | `MAX_DEALS_PER_USER = 500`; silently no-op beyond that |
+| L8 | `create_deal` milestone parse loop | `milestones` JSON array | Megabyte milestone blob parsed and stored; every later read of the deal pays for it | `MAX_MILESTONES_BLOB_LEN` raw-blob cap *before* `json.loads`, then 2..`MAX_MILESTONES = 10` entries with per-description length caps |
+| L9 | `fund_deal` amount-freeze loop | milestone list | — (list already capped at create) | Bounded by `MAX_MILESTONES` |
+| L10 | `request_milestone_verification` evidence filter + crawl | `evidence_list`, `all_urls` | Same surfaces as L1/L2 | `MAX_EVIDENCE_ITEMS = 50` and `MAX_URLS_PER_VERIFICATION = 10`, unchanged |
+| L11 | `settle_milestone` / `claim_refund` released-sum loops | milestone list | — | Bounded by `MAX_MILESTONES` |
 
 Constants live at the top of `contracts/clauseguard.py`. Tune as the protocol matures.
 
@@ -68,12 +72,16 @@ Status legend: ✅ Fixed in this patch · 🟡 Mitigated (partial / by conventio
 | F14 | 🟢 Low | `funded_amount` tamper if a later method rewrites the field | 🟡 Mitigated | No method writes `funded_amount` after `fund_deal`; revisit if new methods touch the deal dict |
 | **N6** | 🟢 **Low (NEW)** | Per-user deal-history list grew unbounded | ✅ Fixed | `MAX_DEALS_PER_USER = 500` cap in `_add_user_deal` |
 | **N7** | 🟢 **Low (NEW)** | Self-dealing across two wallets — seller funds their own deal from a second wallet | ⚠ Acknowledged | Not preventable on-chain (sybil resistance is out of scope). Users should assume any single counterparty may control multiple addresses |
+| **N8** | 🟡 **Medium (milestones)** | Milestone share manipulation — shares that under/over-sum, zero shares, or rounding dust stranding wei | ✅ Fixed | `create_deal` demands `sum(share_bps) == 10000` exactly and every share > 0; at `fund_deal` the last milestone absorbs the integer-division remainder so amounts sum to exactly `funded_amount` |
+| **N9** | 🟠 **High (milestones)** | Classic-path corruption — `submit_evidence` / `request_verification` / `settle_deal` on a milestone deal would drive its status into classic states and bypass per-milestone gating | ✅ Fixed | All three roll back on milestone deals; the milestone variants roll back on classic deals |
+| **N10** | 🟡 **Medium (milestones)** | Counter-terms drift — milestone deals sit in `funded` through evidence and verification, so an amendment there would shift the LLM's judgment mid-stream | ✅ Fixed | `propose_counter_terms` / `accept_counter_terms` allow milestone deals only in `open` |
+| **N11** | 🟠 **High (milestones)** | Out-of-order or double release — releasing milestone k before 0..k-1, re-releasing a released milestone, or releasing after rejection to drain the refundable remainder | ✅ Fixed | `_require_current_milestone` enforces strict ordering; only `verified` milestones release (first release flips to `released`); `settle_milestone` rolls back unless deal status is `funded`/`partially_settled` |
 
 ---
 
 ## What's intentionally still loose
 
-- **`gl.transfer` is commented out** in `settle_deal` and `claim_refund`. Studionet does not process real value transfers in this build; escrow is tracked in contract state only. Re-enable before any non-studionet deployment, and add the N4 / F2 hardening at the same time.
+- **`gl.transfer` is commented out** in `settle_deal`, `claim_refund`, `settle_milestone`, and `cancel_deal`. Studionet does not process real value transfers in this build; escrow (including per-milestone releases) is tracked in contract state only. Re-enable before any non-studionet deployment, and add the N4 / F2 hardening at the same time.
 - **No domain whitelist** for evidence or verification URLs. Length and count caps are the current defense; if a domain whitelist is ever introduced, it likely belongs at the frontend `create_deal` / `submit_evidence` step, not in the contract, because trust is per-deal.
 - **Sybil resistance** is out of scope for the contract. Anyone evaluating a counterparty should treat reputation as off-chain context.
 
@@ -93,4 +101,13 @@ Status legend: ✅ Fixed in this patch · 🟡 Mitigated (partial / by conventio
    - Third-party `propose_counter_terms` on an open deal that already has a pending proposal → reverts
    - 4th `request_verification` on a disputed deal → reverts
    - N1 reproducer (non-party proposal → buyer funds → seller accepts) → reverts at step 4
-6. Open https://explorer-studio.genlayer.com/address/&lt;new&gt;, call `get_deal_count`, confirm 0.
+6. Milestone spot-checks:
+   - Happy path: create with a 2-milestone schedule → fund → milestone-1 evidence → verify → release (deal shows `partially_settled`) → milestone-2 evidence → verify → release (deal `settled`)
+   - `create_deal` with shares summing to 9999 → reverts
+   - `request_milestone_verification(deal, 1)` before milestone 0 released → reverts
+   - Second `settle_milestone` on the same milestone → reverts
+   - `submit_evidence` (classic) on a milestone deal → reverts
+   - `propose_counter_terms` on a funded milestone deal → reverts
+   - Reject milestone 2 after milestone 1 released, then `claim_refund` → settlement JSON shows the split (released amount to seller, remainder to buyer, pro-rata bond slash)
+7. Open https://explorer-studio.genlayer.com/address/&lt;new&gt;, call `get_deal_count`, confirm 0.
+8. Local state-machine regression at any time: `python3 tests/test_milestones.py` (no GenVM needed).

@@ -74,6 +74,7 @@ const STATUS_META = {
   funded:             { label: "FUNDED",       tone: "funded",    pipeStep: 1 },
   evidence_submitted: { label: "EXHIBITS IN",  tone: "verifying", pipeStep: 2 },
   verified:           { label: "AI-VERIFIED",  tone: "released",  pipeStep: 3 },
+  partially_settled:  { label: "PART-SETTLED", tone: "released",  pipeStep: 3 },
   settled:            { label: "SETTLED",      tone: "released",  pipeStep: 4 },
   rejected:           { label: "REJECTED",     tone: "refunded",  pipeStep: 3 },
   refunded:           { label: "REFUNDED",     tone: "refunded",  pipeStep: 4 },
@@ -1270,7 +1271,7 @@ function StrengthMeter({ c = C, analysis }) {
   );
 }
 
-function EvidenceForm({ deal, walletAddress, provider, c = C, onSuccess, onCancel, toast }) {
+function EvidenceForm({ deal, walletAddress, provider, c = C, onSuccess, onCancel, toast, milestoneIndex = null }) {
   const [evType, setEvType]     = useState("delivery_proof");
   const [evUrl, setEvUrl]       = useState("");
   const [evDesc, setEvDesc]     = useState("");
@@ -1284,7 +1285,11 @@ function EvidenceForm({ deal, walletAddress, provider, c = C, onSuccess, onCance
     if (!evDesc.trim()) { toast("Add a short description", "error"); return; }
     try {
       setSubmitting(true);
-      await GL.submitEvidence(walletAddress, provider, parseInt(deal.id), evType, evUrl.trim(), evDesc.trim());
+      if (Number.isInteger(milestoneIndex)) {
+        await GL.submitMilestoneEvidence(walletAddress, provider, parseInt(deal.id), milestoneIndex, evType, evUrl.trim(), evDesc.trim());
+      } else {
+        await GL.submitEvidence(walletAddress, provider, parseInt(deal.id), evType, evUrl.trim(), evDesc.trim());
+      }
       toast("Exhibit entered on-chain", "success");
       onSuccess();
     } catch (err) {
@@ -1333,16 +1338,33 @@ function CreateDealDialog({ c = C, walletAddress, provider, onClose, onSuccess, 
   const [urls, setUrls]         = useState("");
   const [minSources, setMinSources] = useState(1);
   const [collateral, setCollateral] = useState("");
+  const [milestones, setMilestones] = useState([]);
   const [loading, setLoading]   = useState(false);
+
+  const pctTotal = milestones.reduce((sum, m) => sum + (parseFloat(m.pct) || 0), 0);
+
+  function updateMilestone(i, patch) {
+    setMilestones((ms) => ms.map((m, j) => (j === i ? { ...m, ...patch } : m)));
+  }
 
   async function handleCreate() {
     if (!terms.trim())    { toast("Deal terms are required", "error"); return; }
     if (!price.trim())    { toast("Price description is required", "error"); return; }
     if (!deadline.trim()) { toast("Deadline is required", "error"); return; }
+    let milestonesJson = "";
+    if (milestones.length > 0) {
+      if (milestones.length < 2) { toast("Milestone deals need at least 2 milestones", "error"); return; }
+      if (milestones.some((m) => !m.description.trim())) { toast("Every milestone needs a description", "error"); return; }
+      // Percent -> basis points; the contract demands an exact 10000 sum.
+      const bps = milestones.map((m) => Math.round((parseFloat(m.pct) || 0) * 100));
+      if (bps.some((b) => b <= 0)) { toast("Every milestone needs a share above 0%", "error"); return; }
+      if (bps.reduce((a, b) => a + b, 0) !== 10000) { toast("Milestone shares must total exactly 100%", "error"); return; }
+      milestonesJson = JSON.stringify(milestones.map((m, i) => ({ description: m.description.trim(), share_bps: bps[i] })));
+    }
     try {
       setLoading(true);
       const urlArray = urls.split(",").map((u) => u.trim()).filter(Boolean);
-      await GL.createDeal(walletAddress, provider, { terms: terms.trim(), priceDescription: price.trim(), deadlineDescription: deadline.trim(), verificationUrls: urlArray, minSourcesRequired: minSources, collateralWei: genToWei(collateral) });
+      await GL.createDeal(walletAddress, provider, { terms: terms.trim(), priceDescription: price.trim(), deadlineDescription: deadline.trim(), verificationUrls: urlArray, minSourcesRequired: minSources, collateralWei: genToWei(collateral), milestonesJson });
       toast("Deal recorded on-chain", "success");
       onSuccess();
     } catch (err) {
@@ -1415,6 +1437,35 @@ function CreateDealDialog({ c = C, walletAddress, provider, onClose, onSuccess, 
             </div>
           )}
         </div>
+
+        {/* Milestone schedule */}
+        <div style={{ padding: "16px 18px", border: `2px dashed ${c.text}`, background: c.surface, position: "relative" }}>
+          <div style={{ position: "absolute", top: -12, left: 14, background: c.surface, padding: "0 8px", fontFamily: MONO, fontSize: 10, letterSpacing: "0.18em", color: c.textDim, fontWeight: 700 }}>RIDER B — MILESTONE SCHEDULE (OPTIONAL)</div>
+          <p style={{ fontSize: 12.5, color: c.textDim, lineHeight: 1.6, marginBottom: milestones.length ? 12 : 0, marginTop: 4 }}>
+            Split the escrow into phases. The buyer still funds the full amount up front; each milestone is verified and released to you independently, strictly in order. Shares must total exactly 100%.
+          </p>
+          {milestones.map((m, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+              <span style={{ fontFamily: SERIF, fontWeight: 900, fontSize: 14, color: c.accent2, width: 18 }}>{i + 1}.</span>
+              <input value={m.description} onChange={(e) => updateMilestone(i, { description: e.target.value })} placeholder={`e.g. ${i === 0 ? "Design mockups delivered and approved" : "Final build shipped to production"}`} maxLength={500} style={{ ...deedInput, flex: 1, fontSize: 13 }} onFocus={deedFocus} onBlur={deedBlur} />
+              <input value={m.pct} onChange={(e) => updateMilestone(i, { pct: e.target.value.replace(/[^0-9.]/g, "") })} placeholder="50" style={{ ...deedInput, width: 62, fontFamily: MONO, fontSize: 13, textAlign: "right" }} onFocus={deedFocus} onBlur={deedBlur} />
+              <span style={{ fontSize: 12, color: c.textDim, fontFamily: MONO }}>%</span>
+              <button onClick={() => setMilestones((ms) => ms.filter((_, j) => j !== i))} title="Remove milestone" style={{ background: "none", border: `1.5px solid ${c.border}`, color: c.textDim, cursor: "pointer", width: 26, height: 26, fontSize: 14, lineHeight: 1 }}>×</button>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: milestones.length ? 4 : 12 }}>
+            {milestones.length < 10 && (
+              <Btn kind="ghost" c={c} size="sm" icon="plus" onClick={() => setMilestones((ms) => ms.length === 0 ? [{ description: "", pct: "50" }, { description: "", pct: "50" }] : [...ms, { description: "", pct: "" }])}>
+                {milestones.length === 0 ? "Add a milestone schedule" : "Add milestone"}
+              </Btn>
+            )}
+            {milestones.length > 0 && (
+              <span style={{ fontSize: 11, fontFamily: MONO, fontWeight: 700, color: Math.round(pctTotal * 100) === 10000 ? c.success : c.danger }}>
+                TOTAL {pctTotal}% {Math.round(pctTotal * 100) === 10000 ? "✓" : "— MUST EQUAL 100%"}
+              </span>
+            )}
+          </div>
+        </div>
       </div>
 
       <div style={{ padding: "18px 34px 30px", display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: `2px solid ${c.text}`, gap: 12 }}>
@@ -1430,7 +1481,7 @@ function CreateDealDialog({ c = C, walletAddress, provider, onClose, onSuccess, 
   );
 }
 
-function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRefresh, toast, onShowTerms }) {
+function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRefresh, onDealUpdated, toast, onShowTerms }) {
   const [showEvidenceForm, setShowEvidenceForm] = useState(false);
   const [showCounterForm, setShowCounterForm]   = useState(false);
   const [counterTermsInput, setCounterTermsInput] = useState("");
@@ -1461,26 +1512,52 @@ function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRef
   const isFunded = fundedWei > 0n;
   const bond = hasCollateral(deal);
 
-  const attempts = parseInt(deal.verification_attempts || "0") || 0;
+  let milestones = [];
+  try { milestones = deal.milestones ? JSON.parse(deal.milestones) : []; } catch {}
+  const isMilestoneDeal = milestones.length > 0;
+  // Milestones release strictly in order, so the first non-released one is
+  // the only one accepting evidence / verification / release.
+  const currentIdx = milestones.findIndex((m) => m.status !== "released");
+  const currentMilestone = currentIdx >= 0 ? milestones[currentIdx] : null;
+  const releasedCount = milestones.filter((m) => m.status === "released").length;
+
+  // The attempt counter lives per-milestone on milestone deals.
+  const attempts = isMilestoneDeal
+    ? parseInt(currentMilestone?.verification_attempts || "0") || 0
+    : parseInt(deal.verification_attempts || "0") || 0;
   const attemptsLeft = Math.max(0, MAX_VERIFICATION_ATTEMPTS - attempts);
   const appealsExhausted = attempts >= MAX_VERIFICATION_ATTEMPTS;
 
   const stampInk = meta.tone === "refunded" ? c.danger : (meta.tone === "released" || meta.tone === "funded") ? c.success : meta.tone === "open" ? c.accent : c.warn;
   const EXHIBIT_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"];
 
-  async function tx(label, fn) {
+  // Refresh both the docket and this dialog's deal object without closing —
+  // mid-stream milestone actions shouldn't dump the user out of the case file.
+  async function refreshInPlace() {
+    onRefresh();
+    try {
+      const fresh = await GL.fetchDeal(parseInt(deal.id));
+      if (fresh) onDealUpdated?.(fresh);
+    } catch {}
+  }
+
+  async function tx(label, fn, { keepOpen = false } = {}) {
     try {
       setTxMsg(label);
       await fn();
       toast(label + " complete", "success");
-      onRefresh();
-      onClose();
+      if (keepOpen) {
+        await refreshInPlace();
+      } else {
+        onRefresh();
+        onClose();
+      }
     } catch (err) {
       toast(err.message || "Transaction failed", "error");
     } finally { setTxMsg(null); }
   }
 
-  async function runVerification() {
+  async function runVerification(milestoneIndex = null) {
     const VALVE_IDS = ["VAL-A1", "VAL-A2", "VAL-B1", "VAL-B2", "VAL-C1"];
     setVerifying(true);
     setVerifyStage(0);
@@ -1502,13 +1579,21 @@ function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRef
     setTimeout(() => setValidators(["VAL-A1", "VAL-A2", "VAL-B1"]), 40000);
 
     try {
-      await GL.requestVerification(walletAddress, provider, parseInt(deal.id));
+      if (Number.isInteger(milestoneIndex)) {
+        await GL.requestMilestoneVerification(walletAddress, provider, parseInt(deal.id), milestoneIndex);
+      } else {
+        await GL.requestVerification(walletAddress, provider, parseInt(deal.id));
+      }
       clearInterval(timer);
       setVerifyStage(VERIFY_STAGES.length - 1);
       await new Promise((r) => setTimeout(r, 800));
       toast("AI verification complete", "success");
-      onRefresh();
-      onClose();
+      if (Number.isInteger(milestoneIndex)) {
+        await refreshInPlace();
+      } else {
+        onRefresh();
+        onClose();
+      }
     } catch (err) {
       clearInterval(timer);
       toast("Verification failed: " + err.message, "error");
@@ -1593,6 +1678,32 @@ function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRef
             </div>
           )}
 
+          {/* Milestone schedule — phased releases */}
+          {isMilestoneDeal && (
+            <div style={{ marginBottom: 18, padding: "14px 16px", border: `2px dashed ${c.text}`, background: c.surface, position: "relative" }}>
+              <div style={{ position: "absolute", top: -11, left: 12, background: c.surface, padding: "0 8px", fontFamily: MONO, fontSize: 9.5, letterSpacing: "0.16em", color: c.textDim, fontWeight: 700 }}>RIDER B — MILESTONE SCHEDULE · {releasedCount}/{milestones.length} RELEASED</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
+                {milestones.map((m, i) => {
+                  const mStatus = m.status || "pending";
+                  const mColor = mStatus === "released" ? c.success : mStatus === "verified" ? c.accent2 : mStatus === "rejected" ? c.danger : mStatus === "disputed" ? c.warn : c.textMute;
+                  return (
+                    <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 12px", background: c.bg, border: `1.5px solid ${i === currentIdx ? c.text : c.border}`, opacity: mStatus === "released" ? 0.75 : 1 }}>
+                      <span style={{ fontFamily: SERIF, fontWeight: 900, fontSize: 14, color: c.accent2, flexShrink: 0, lineHeight: 1.4 }}>{i + 1}.</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12.5, color: c.text, lineHeight: 1.5 }}>{m.description}</div>
+                        <div style={{ marginTop: 3, fontSize: 10.5, color: c.textMute, fontFamily: MONO }}>
+                          {isFunded ? `${fmtGen(m.amount)} GEN` : `${(parseInt(m.share_bps) || 0) / 100}% OF ESCROW`}
+                          {i === currentIdx && mStatus !== "released" && " · CURRENT"}
+                        </div>
+                      </div>
+                      <span style={{ flexShrink: 0, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.1em", color: mColor, border: `1.5px solid ${mColor}`, padding: "2px 7px", fontFamily: MONO }}>{mStatus.toUpperCase()}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <SectionLabel c={c}>Exhibits entered ({evidence.length})</SectionLabel>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
@@ -1603,7 +1714,7 @@ function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRef
               <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 14px", background: c.bg, border: `1.5px solid ${c.text}` }}>
                 <span style={{ fontFamily: SERIF, fontWeight: 900, fontSize: 15, color: c.accent2, flexShrink: 0, lineHeight: 1.3 }}>{EXHIBIT_LETTERS[i] || i + 1}.</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: c.textMute, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 3, fontFamily: MONO }}>EXHIBIT {EXHIBIT_LETTERS[i] || i + 1} · {(ev.type || ev.evidence_type || "other").replace(/_/g, " ")}</div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: c.textMute, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 3, fontFamily: MONO }}>EXHIBIT {EXHIBIT_LETTERS[i] || i + 1} · {(ev.type || ev.evidence_type || "other").replace(/_/g, " ")}{ev.milestone != null && ev.milestone !== "" ? ` · MILESTONE ${parseInt(ev.milestone) + 1}` : ""}</div>
                   {ev.url && <a href={ev.url} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: c.accent, wordBreak: "break-all", display: "block", fontFamily: MONO }}>{ev.url.slice(0, 55)}{ev.url.length > 55 ? "…" : ""}</a>}
                   {ev.description && <div style={{ marginTop: 3, fontSize: 12, color: c.textDim }}>{ev.description}</div>}
                 </div>
@@ -1613,11 +1724,16 @@ function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRef
 
           {showEvidenceForm ? (
             <div style={{ marginTop: 12, padding: 18, background: c.surface, border: `2px solid ${c.text}` }}>
-              <EvidenceForm deal={deal} walletAddress={walletAddress} provider={provider} c={c} toast={toast} onSuccess={async () => { setShowEvidenceForm(false); onRefresh(); }} onCancel={() => setShowEvidenceForm(false)} />
+              {isMilestoneDeal && (
+                <div style={{ marginBottom: 12, fontSize: 10.5, color: c.accent2, fontFamily: MONO, fontWeight: 700, letterSpacing: "0.1em" }}>FILING UNDER MILESTONE {currentIdx + 1} OF {milestones.length}</div>
+              )}
+              <EvidenceForm deal={deal} walletAddress={walletAddress} provider={provider} c={c} toast={toast} milestoneIndex={isMilestoneDeal ? currentIdx : null} onSuccess={async () => { setShowEvidenceForm(false); isMilestoneDeal ? await refreshInPlace() : onRefresh(); }} onCancel={() => setShowEvidenceForm(false)} />
             </div>
           ) : (
-            isParty && ["funded", "evidence_submitted", "open", "disputed"].includes(status) && walletAddress && (
-              <Btn kind="ghost" size="sm" c={c} icon="upload" style={{ marginTop: 12 }} onClick={() => setShowEvidenceForm(true)}>Enter an exhibit</Btn>
+            isParty && walletAddress && (isMilestoneDeal
+              ? ["funded", "partially_settled", "disputed"].includes(status) && currentIdx >= 0 && ["pending", "disputed"].includes(currentMilestone?.status || "pending")
+              : ["funded", "evidence_submitted", "open", "disputed"].includes(status)) && (
+              <Btn kind="ghost" size="sm" c={c} icon="upload" style={{ marginTop: 12 }} onClick={() => setShowEvidenceForm(true)}>{isMilestoneDeal ? `Enter an exhibit for milestone ${currentIdx + 1}` : "Enter an exhibit"}</Btn>
             )
           )}
 
@@ -1652,7 +1768,7 @@ function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRef
                   attemptsLeft={attemptsLeft}
                   appealsExhausted={appealsExhausted}
                   onAddEvidence={() => setShowEvidenceForm(true)}
-                  onReVerify={runVerification}
+                  onReVerify={() => runVerification(isMilestoneDeal ? currentIdx : null)}
                   onShowTerms={() => { onShowTerms?.(); }}
                 />
               )}
@@ -1703,7 +1819,7 @@ function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRef
                 </div>
               )}
 
-              {!deal.pending_terms && !isSeller && ["open", "funded"].includes(status) && walletAddress && !showCounterForm && (
+              {!deal.pending_terms && !isSeller && (isMilestoneDeal ? status === "open" : ["open", "funded"].includes(status)) && walletAddress && !showCounterForm && (
                 <Btn kind="subtle" c={c} size="sm" style={{ width: "100%", justifyContent: "center" }} onClick={() => setShowCounterForm(true)}>Propose counter-terms</Btn>
               )}
 
@@ -1719,10 +1835,26 @@ function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRef
               )}
 
               {status === "evidence_submitted" && isSeller && (
-                <Btn kind="primary" c={c} icon="spark" style={{ justifyContent: "center" }} onClick={runVerification}>Summon the tribunal</Btn>
+                <Btn kind="primary" c={c} icon="spark" style={{ justifyContent: "center" }} onClick={() => runVerification()}>Summon the tribunal</Btn>
               )}
 
-              {["funded", "evidence_submitted"].includes(status) && isParty && (
+              {/* Milestone deals: verify then release the current milestone */}
+              {isMilestoneDeal && isParty && ["funded", "partially_settled"].includes(status) && currentMilestone?.status === "pending" && (
+                <Btn kind="primary" c={c} icon="spark" style={{ justifyContent: "center" }} onClick={() => runVerification(currentIdx)}>
+                  Summon the tribunal · milestone {currentIdx + 1} of {milestones.length}
+                </Btn>
+              )}
+
+              {isMilestoneDeal && isParty && ["funded", "partially_settled"].includes(status) && currentMilestone?.status === "verified" && (
+                <Btn kind="success" c={c} icon="check" style={{ justifyContent: "center" }} onClick={() => {
+                  const isLast = currentIdx === milestones.length - 1;
+                  tx(`Releasing milestone ${currentIdx + 1}…`, () => GL.settleMilestone(walletAddress, provider, parseInt(deal.id), currentIdx), { keepOpen: !isLast });
+                }}>
+                  Release milestone {currentIdx + 1} · {fmtGen(currentMilestone.amount)} GEN
+                </Btn>
+              )}
+
+              {["funded", "evidence_submitted", "partially_settled"].includes(status) && isParty && (
                 <Btn kind="subtle" c={c} size="sm" icon="clock" style={{ justifyContent: "center" }} onClick={() => tx("Checking deadline…", () => GL.checkDeadline(walletAddress, provider, parseInt(deal.id)))}>Check deadline</Btn>
               )}
 
@@ -1765,6 +1897,13 @@ function DealCard({ deal, walletAddress, c = C, onOpen }) {
   const title   = dealTitle(deal);
   const stampInk = meta.tone === "refunded" ? c.danger : (meta.tone === "released" || meta.tone === "funded") ? c.success : meta.tone === "open" ? c.accent : c.warn;
 
+  let milestoneCount = 0, milestonesReleased = 0;
+  try {
+    const ms = deal.milestones ? JSON.parse(deal.milestones) : [];
+    milestoneCount = ms.length;
+    milestonesReleased = ms.filter((m) => m.status === "released").length;
+  } catch {}
+
   return (
     <div className="cg-card-hover" onClick={() => onOpen(deal)} style={{ cursor: "pointer", position: "relative", height: "100%", paddingTop: 14 }}>
       {/* folder tab */}
@@ -1783,6 +1922,11 @@ function DealCard({ deal, walletAddress, c = C, onOpen }) {
           {hasCollateral(deal) && (
             <span title="Good-faith bond" style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 9, color: c.accent2, fontWeight: 700, letterSpacing: "0.1em", border: `1.5px solid ${c.accent2}`, padding: "2px 7px", fontFamily: MONO }}>
               <Icon name="shield" size={10} color={c.accent2} />BONDED
+            </span>
+          )}
+          {milestoneCount > 0 && (
+            <span title="Phased release schedule" style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 9, color: c.accent2, fontWeight: 700, letterSpacing: "0.1em", border: `1.5px solid ${c.accent2}`, padding: "2px 7px", fontFamily: MONO }}>
+              {milestonesReleased}/{milestoneCount} MILESTONES
             </span>
           )}
           <span style={{ flex: 1 }} />
@@ -2016,7 +2160,7 @@ export default function ClauseGuardApp() {
       {!accepted && <AcceptanceGate c={c} onAccept={acceptTerms} onReadFull={() => setShowTerms(true)} />}
       {showTerms && <TermsDialog c={c} onClose={() => setShowTerms(false)} />}
       {showCreate && <CreateDealDialog c={c} walletAddress={walletAddress} provider={provider} toast={toast} onClose={() => setShowCreate(false)} onSuccess={async () => { setShowCreate(false); await loadDeals(); }} />}
-      {openDeal   && <DealDetailDialog c={c} deal={openDeal} walletAddress={walletAddress} provider={provider} toast={toast} onClose={() => setOpenDeal(null)} onRefresh={loadDeals} onShowTerms={() => { setOpenDeal(null); setShowTerms(true); }} />}
+      {openDeal   && <DealDetailDialog c={c} deal={openDeal} walletAddress={walletAddress} provider={provider} toast={toast} onClose={() => setOpenDeal(null)} onRefresh={loadDeals} onDealUpdated={setOpenDeal} onShowTerms={() => { setOpenDeal(null); setShowTerms(true); }} />}
 
       <ToastStack toasts={toasts} c={c} />
     </div>

@@ -21,6 +21,11 @@ MAX_WEB_SUMMARY_LEN = 50_000
 MAX_VERIFICATION_ATTEMPTS = 3
 MAX_DEALS_PER_USER = 500
 MAX_PAGE_SIZE = 100
+MAX_MILESTONES = 10
+BPS_TOTAL = 10000
+# Raw JSON blob cap for the milestones param — checked BEFORE json.loads, same
+# rationale as the verification_urls blob cap in create_deal.
+MAX_MILESTONES_BLOB_LEN = MAX_MILESTONES * (MAX_DESCRIPTION_LEN + 100)
 
 
 class ClauseGuard(gl.Contract):
@@ -53,6 +58,7 @@ class ClauseGuard(gl.Contract):
         deadline_description: str,
         verification_urls: str,
         min_sources_required: u256,
+        milestones: str,
     ) -> u256:
         """
         Seller creates a new deal with natural language terms.
@@ -64,6 +70,10 @@ class ClauseGuard(gl.Contract):
             verification_urls: Comma-separated URLs for evidence verification
             min_sources_required: Minimum number of distinct sources that must
                                   confirm the conditions (1 = standard, 2-3 = multi-sig)
+            milestones: "" for a classic deal, or a JSON array of
+                        {"description", "share_bps"} objects defining phased
+                        conditions whose share_bps sum to exactly 10000. Each
+                        milestone is verified and released independently.
 
         Returns:
             The new deal ID
@@ -99,6 +109,52 @@ class ClauseGuard(gl.Contract):
 
         min_src = max(1, int(min_sources_required))
 
+        # ── Milestones ──
+        # "" = classic single-release deal. Otherwise a JSON array of
+        # {description, share_bps}; shares must sum to exactly BPS_TOTAL so no
+        # slice of the escrow is ever unassigned. Wei amounts are computed at
+        # fund time (the price is only a description string until then).
+        milestone_list = []
+        if milestones.strip():
+            if len(milestones) > MAX_MILESTONES_BLOB_LEN:
+                gl.rollback("Milestones blob too large")
+            try:
+                parsed_milestones = json.loads(milestones)
+            except json.JSONDecodeError:
+                gl.rollback("Milestones must be a JSON array")
+            if not isinstance(parsed_milestones, list):
+                gl.rollback("Milestones must be a JSON array")
+            if len(parsed_milestones) < 2:
+                gl.rollback("Milestone deals need at least 2 milestones")
+            if len(parsed_milestones) > MAX_MILESTONES:
+                gl.rollback("Too many milestones")
+            total_bps = 0
+            for m in parsed_milestones:
+                if not isinstance(m, dict):
+                    gl.rollback("Each milestone must be an object")
+                m_desc = str(m.get("description", "")).strip()
+                if not m_desc:
+                    gl.rollback("Milestone description cannot be empty")
+                if len(m_desc) > MAX_DESCRIPTION_LEN:
+                    gl.rollback("Milestone description too long")
+                try:
+                    bps = int(m.get("share_bps", "0"))
+                except (TypeError, ValueError):
+                    gl.rollback("Milestone share_bps must be an integer")
+                if bps <= 0:
+                    gl.rollback("Milestone share_bps must be positive")
+                total_bps += bps
+                milestone_list.append({
+                    "description": m_desc,
+                    "share_bps": str(bps),
+                    "amount": "0",
+                    "status": "pending",
+                    "verdict_details": "",
+                    "verification_attempts": "0",
+                })
+            if total_bps != BPS_TOTAL:
+                gl.rollback("Milestone shares must sum to exactly 10000 basis points")
+
         # ── Good-faith collateral ──
         # Any value the seller attaches at creation becomes the required bond.
         # The buyer must match it when funding. Bonds are returned in full when
@@ -131,6 +187,7 @@ class ClauseGuard(gl.Contract):
             "collateral_amount": str(collateral_amount),
             "buyer_collateral": "0",
             "settlement": "",
+            "milestones": json.dumps(milestone_list) if milestone_list else "",
         }
 
         self.deals[deal_id] = json.dumps(deal)
@@ -175,6 +232,22 @@ class ClauseGuard(gl.Contract):
         deal["buyer"] = str(gl.message.sender_address)
         deal["status"] = "funded"
 
+        # Freeze milestone wei amounts now that the real escrow value is known.
+        # The last milestone absorbs the integer-division remainder so the
+        # amounts always sum to exactly funded_amount — no dust strands.
+        milestone_list = self._get_milestones(deal)
+        if milestone_list:
+            funded = int(deal["funded_amount"])
+            allocated = 0
+            for i, m in enumerate(milestone_list):
+                if i < len(milestone_list) - 1:
+                    amount = funded * int(m["share_bps"]) // BPS_TOTAL
+                else:
+                    amount = funded - allocated
+                m["amount"] = str(amount)
+                allocated += amount
+            deal["milestones"] = json.dumps(milestone_list)
+
         # Funding invalidates any pending counter-terms proposed before a buyer
         # existed — otherwise an attacker could pre-stage hostile terms.
         deal["pending_terms"] = ""
@@ -195,6 +268,11 @@ class ClauseGuard(gl.Contract):
             description: Plain English description of what this evidence shows
         """
         deal = self._get_deal(deal_id)
+
+        # Milestone deals never enter the classic evidence_submitted state —
+        # this path would corrupt their status machine.
+        if self._is_milestone_deal(deal):
+            gl.rollback("Milestone deal — use submit_milestone_evidence")
 
         if deal["status"] not in ("funded", "evidence_submitted", "disputed"):
             gl.rollback("Deal must be funded before evidence can be submitted")
@@ -244,6 +322,9 @@ class ClauseGuard(gl.Contract):
         """
         deal = self._get_deal(deal_id)
 
+        if self._is_milestone_deal(deal):
+            gl.rollback("Milestone deal — use request_milestone_verification")
+
         if deal["status"] not in ("evidence_submitted", "disputed"):
             gl.rollback("Evidence must be submitted before verification")
 
@@ -270,6 +351,29 @@ class ClauseGuard(gl.Contract):
         min_sources = int(deal.get("min_sources_required", "1"))
         is_redispatch = deal["status"] == "disputed"
 
+        verdict = self._run_verification(deal, evidence_list, all_urls, min_sources, is_redispatch, "")
+
+        # Update deal based on verdict
+        deal["verdict"] = "approved" if verdict["conditions_met"] else "rejected"
+        deal["verdict_details"] = json.dumps(verdict)
+
+        if verdict["conditions_met"]:
+            deal["status"] = "verified"
+        else:
+            if verdict["confidence"] == "low":
+                deal["status"] = "disputed"
+            else:
+                deal["status"] = "rejected"
+
+        self.deals[deal_id] = json.dumps(deal)
+
+    def _run_verification(self, deal, evidence_list, all_urls, min_sources, is_redispatch, milestone_section):
+        """
+        Shared LLM verification core: crawl the URLs, build the judge prompt,
+        run it under the equivalence principle, and return the parsed verdict
+        dict. `milestone_section` is "" on the classic path (prompt unchanged)
+        or a scoping note naming the single milestone under review.
+        """
         # ── AI VERIFICATION via Equivalence Principle ──
         def verify_conditions():
             # Step 1: Fetch web evidence from all provided URLs
@@ -324,7 +428,7 @@ DEAL TERMS (agreed upon by both parties):
 \"\"\"{deal['terms']}\"\"\"
 
 PRICE: {deal['price_description']}
-DEADLINE: {deal['deadline_description']}
+DEADLINE: {deal['deadline_description']}{milestone_section}
 
 SUBMITTED EVIDENCE:
 {evidence_summary}
@@ -372,20 +476,188 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
 
         # Execute with equivalence principle for validator consensus
         verdict_json = gl.eq_principle.strict_eq(verify_conditions)
-        verdict = json.loads(verdict_json)
+        return json.loads(verdict_json)
 
-        # Update deal based on verdict
+    @gl.public.write
+    def submit_milestone_evidence(self, deal_id: u256, milestone_index: u256, evidence_type: str, evidence_url: str, description: str):
+        """
+        Either party submits evidence for a specific milestone of a milestone
+        deal. Evidence goes into the same deal-wide list (one cap for all of
+        it) tagged with the milestone index; deal status is not touched — the
+        milestone machine advances only through verification and release.
+        """
+        deal = self._get_deal(deal_id)
+
+        if not self._is_milestone_deal(deal):
+            gl.rollback("Not a milestone deal — use submit_evidence")
+
+        if deal["status"] not in ("funded", "partially_settled", "disputed"):
+            gl.rollback("Deal must be funded before evidence can be submitted")
+
+        sender = str(gl.message.sender_address)
+        if sender != deal["seller"] and sender != deal["buyer"]:
+            gl.rollback("Only deal parties can submit evidence")
+
+        if not evidence_type.strip() or not evidence_url.strip() or not description.strip():
+            gl.rollback("Evidence fields cannot be empty")
+        if len(evidence_type) > MAX_DESCRIPTION_LEN:
+            gl.rollback("Evidence type too long")
+        if len(evidence_url) > MAX_URL_LEN:
+            gl.rollback("Evidence URL too long")
+        if len(description) > MAX_DESCRIPTION_LEN:
+            gl.rollback("Description too long")
+
+        milestone_list = self._get_milestones(deal)
+        idx = int(milestone_index)
+        m = self._require_current_milestone(milestone_list, idx)
+        if m["status"] not in ("pending", "disputed"):
+            gl.rollback("Milestone is not accepting evidence")
+
+        evidence_list = json.loads(deal["evidence"])
+        if len(evidence_list) >= MAX_EVIDENCE_ITEMS:
+            gl.rollback("Maximum evidence items reached for this deal")
+        evidence_list.append({
+            "submitted_by": sender,
+            "type": evidence_type,
+            "url": evidence_url,
+            "description": description,
+            "milestone": str(idx),
+        })
+
+        deal["evidence"] = json.dumps(evidence_list)
+        self.deals[deal_id] = json.dumps(deal)
+
+    @gl.public.write
+    def request_milestone_verification(self, deal_id: u256, milestone_index: u256):
+        """
+        Either party requests AI verification of one milestone's condition.
+        Milestones verify strictly in order; a milestone can be re-verified
+        from 'disputed' up to MAX_VERIFICATION_ATTEMPTS times.
+
+        Routing: approved -> milestone 'verified' (release via settle_milestone);
+        rejected at low confidence -> milestone and deal 'disputed';
+        rejected otherwise -> milestone and deal 'rejected' (buyer may claim
+        a refund of everything not yet released).
+        """
+        deal = self._get_deal(deal_id)
+
+        if not self._is_milestone_deal(deal):
+            gl.rollback("Not a milestone deal — use request_verification")
+
+        if deal["status"] not in ("funded", "partially_settled", "disputed"):
+            gl.rollback("Deal is not in a verifiable state")
+
+        sender = str(gl.message.sender_address)
+        if sender != deal["seller"] and sender != deal["buyer"]:
+            gl.rollback("Only deal parties can request verification")
+
+        milestone_list = self._get_milestones(deal)
+        idx = int(milestone_index)
+        m = self._require_current_milestone(milestone_list, idx)
+        if m["status"] not in ("pending", "disputed"):
+            gl.rollback("Milestone is not pending verification")
+
+        # Cap re-verification attempts per milestone so a disputed milestone
+        # cannot loop forever.
+        attempts = int(m.get("verification_attempts", "0")) + 1
+        if attempts > MAX_VERIFICATION_ATTEMPTS:
+            gl.rollback("Maximum verification attempts reached for this milestone — escalate dispute off-chain")
+        m["verification_attempts"] = str(attempts)
+
+        # Scope evidence to this milestone plus untagged (deal-wide) items.
+        evidence_list = json.loads(deal["evidence"])
+        scoped_evidence = [e for e in evidence_list if e.get("milestone", "") in ("", str(idx))]
+        evidence_urls = [e["url"] for e in scoped_evidence]
+        verification_urls = [u.strip() for u in deal["verification_urls"].split(",") if u.strip()]
+        all_urls = list(set(evidence_urls + verification_urls))
+        if len(all_urls) > MAX_URLS_PER_VERIFICATION:
+            gl.rollback("Too many URLs for one verification — reduce evidence count")
+
+        min_sources = int(deal.get("min_sources_required", "1"))
+        is_redispatch = m["status"] == "disputed"
+
+        milestone_section = (
+            f"\n\nMILESTONE UNDER REVIEW (milestone {idx + 1} of {len(milestone_list)}):\n"
+            f'"""{m["description"]}"""\n\n'
+            "Assess ONLY whether THIS milestone's condition is satisfied. The overall deal "
+            "terms above are context; do not require conditions that belong to other milestones."
+        )
+
+        verdict = self._run_verification(deal, scoped_evidence, all_urls, min_sources, is_redispatch, milestone_section)
+
+        m["verdict_details"] = json.dumps(verdict)
+        # Mirror the verdict at deal level so the existing verdict UI and the
+        # claim_refund status gate work unchanged for milestone deals.
         deal["verdict"] = "approved" if verdict["conditions_met"] else "rejected"
         deal["verdict_details"] = json.dumps(verdict)
 
         if verdict["conditions_met"]:
-            deal["status"] = "verified"
+            m["status"] = "verified"
+            deal["status"] = self._milestone_base_status(milestone_list)
         else:
             if verdict["confidence"] == "low":
+                m["status"] = "disputed"
                 deal["status"] = "disputed"
             else:
+                m["status"] = "rejected"
                 deal["status"] = "rejected"
 
+        deal["milestones"] = json.dumps(milestone_list)
+        self.deals[deal_id] = json.dumps(deal)
+
+    @gl.public.write
+    def settle_milestone(self, deal_id: u256, milestone_index: u256):
+        """
+        Release one verified milestone's share to the seller. Releasing the
+        last milestone settles the deal and returns both good-faith bonds.
+        """
+        deal = self._get_deal(deal_id)
+
+        if not self._is_milestone_deal(deal):
+            gl.rollback("Not a milestone deal — use settle_deal")
+
+        # A rejected/refunded/disputed deal must not leak releases — the
+        # unreleased remainder belongs to the refund path.
+        if deal["status"] not in ("funded", "partially_settled"):
+            gl.rollback("Deal is not in a releasable state")
+
+        sender = str(gl.message.sender_address)
+        if sender != deal["seller"] and sender != deal["buyer"]:
+            gl.rollback("Only deal parties can settle")
+
+        milestone_list = self._get_milestones(deal)
+        idx = int(milestone_index)
+        m = self._require_current_milestone(milestone_list, idx)
+        # 'verified' is the only releasable state, so double-release is
+        # impossible: the first release moves the milestone to 'released'.
+        if m["status"] != "verified":
+            gl.rollback("Milestone must be verified before release")
+
+        # In production:
+        # gl.transfer(Address(deal["seller"]), u256(int(m["amount"])))
+        m["status"] = "released"
+
+        if all(ms["status"] == "released" for ms in milestone_list):
+            # Final milestone — cooperative outcome, same as classic settle:
+            # both bonds return to their owners.
+            seller_bond = int(deal.get("collateral_amount", "0"))
+            buyer_bond = int(deal.get("buyer_collateral", "0"))
+            # In production:
+            # if seller_bond > 0:
+            #     gl.transfer(Address(deal["seller"]), u256(seller_bond))
+            # if buyer_bond > 0:
+            #     gl.transfer(Address(deal["buyer"]), u256(buyer_bond))
+            deal["status"] = "settled"
+            deal["settlement"] = json.dumps({
+                "price_to": "seller",
+                "released": "all",
+                "seller_collateral": "returned",
+                "buyer_collateral": "returned",
+            })
+        else:
+            deal["status"] = "partially_settled"
+
+        deal["milestones"] = json.dumps(milestone_list)
         self.deals[deal_id] = json.dumps(deal)
 
     @gl.public.write
@@ -402,6 +674,12 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
 
         if deal["status"] not in ("open", "funded"):
             gl.rollback("Counter-terms can only be proposed for open or funded deals")
+
+        # Milestone deals sit in 'funded' through evidence and verification of
+        # milestone 0, so a funded-stage amendment could shift LLM judgment
+        # mid-stream. Terms are amendable only before a buyer commits.
+        if self._is_milestone_deal(deal) and deal["status"] != "open":
+            gl.rollback("Counter-terms on milestone deals are only allowed before funding")
 
         sender = str(gl.message.sender_address)
         if sender == deal["seller"]:
@@ -449,6 +727,11 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         if deal["status"] not in ("open", "funded"):
             gl.rollback("Counter-terms can only be accepted for open or funded deals")
 
+        # Same reasoning as propose_counter_terms: milestone terms freeze once
+        # a buyer funds.
+        if self._is_milestone_deal(deal) and deal["status"] != "open":
+            gl.rollback("Counter-terms on milestone deals are only allowed before funding")
+
         # If a buyer has funded, the proposal must come from that buyer —
         # otherwise the seller could bind the buyer's locked funds to terms
         # proposed by a third party (the counter-terms hijack).
@@ -489,7 +772,7 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         """
         deal = self._get_deal(deal_id)
 
-        if deal["status"] not in ("funded", "evidence_submitted"):
+        if deal["status"] not in ("funded", "evidence_submitted", "partially_settled"):
             gl.rollback("Deadline can only be checked for funded deals")
 
         sender = str(gl.message.sender_address)
@@ -566,6 +849,9 @@ Respond with ONLY a valid JSON object:
         """
         deal = self._get_deal(deal_id)
 
+        if self._is_milestone_deal(deal):
+            gl.rollback("Milestone deal — use settle_milestone")
+
         if deal["status"] != "verified":
             gl.rollback("Deal must be verified before settlement")
 
@@ -603,6 +889,52 @@ Respond with ONLY a valid JSON object:
         sender = str(gl.message.sender_address)
         if sender != deal["buyer"]:
             gl.rollback("Only buyer can claim refund")
+
+        # ── Milestone branch ──
+        # Released milestones stay with the seller; the refund is exactly the
+        # unreleased remainder (the sequential release rule makes this exact).
+        # The seller's bond is slashed pro-rata to the undelivered share: the
+        # at-risk slice splits 50/50 buyer/protocol like classic, the rest
+        # returns to the seller — a mostly-delivered seller isn't punished as
+        # if they had delivered nothing, and the buyer's upside stays capped.
+        milestone_list = self._get_milestones(deal)
+        if milestone_list:
+            released_amount = 0
+            released_bps = 0
+            for m in milestone_list:
+                if m["status"] == "released":
+                    released_amount += int(m["amount"])
+                    released_bps += int(m["share_bps"])
+            refund = int(deal["funded_amount"]) - released_amount
+            remaining_bps = BPS_TOTAL - released_bps
+
+            seller_bond = int(deal.get("collateral_amount", "0"))
+            buyer_bond = int(deal.get("buyer_collateral", "0"))
+            slash_base = seller_bond * remaining_bps // BPS_TOTAL
+            # Integer split — the buyer never gets more than half; any odd wei
+            # rounds to the protocol side.
+            seller_to_buyer = slash_base // 2
+            seller_to_protocol = slash_base - seller_to_buyer
+            seller_returned = seller_bond - slash_base
+            # In production:
+            # gl.transfer(gl.message.sender_address, u256(refund + buyer_bond + seller_to_buyer))
+            # if seller_returned > 0:
+            #     gl.transfer(Address(deal["seller"]), u256(seller_returned))
+            # seller_to_protocol stays in the contract (protocol-retained / burned)
+
+            deal["status"] = "refunded"
+            deal["settlement"] = json.dumps({
+                "price_to": "split" if released_amount > 0 else "buyer",
+                "released_to_seller": str(released_amount),
+                "refunded_to_buyer": str(refund),
+                "seller_collateral": "split_buyer_protocol" if seller_bond > 0 else "none",
+                "seller_collateral_returned": str(seller_returned),
+                "seller_collateral_to_buyer": str(seller_to_buyer),
+                "seller_collateral_to_protocol": str(seller_to_protocol),
+                "buyer_collateral": "returned" if buyer_bond > 0 else "none",
+            })
+            self.deals[deal_id] = json.dumps(deal)
+            return
 
         # Conditions were not met (or the deadline expired). The seller failed
         # to see the deal through, so the buyer is made whole on the escrow
@@ -722,6 +1054,34 @@ Respond with ONLY a valid JSON object:
         if not raw:
             gl.rollback("Deal not found")
         return json.loads(raw)
+
+    def _is_milestone_deal(self, deal) -> bool:
+        """True when the deal carries a milestone schedule."""
+        return bool(deal.get("milestones", ""))
+
+    def _get_milestones(self, deal) -> list:
+        """Parse the deal's milestone list ([] for classic deals)."""
+        raw = deal.get("milestones", "")
+        return json.loads(raw) if raw else []
+
+    def _milestone_base_status(self, milestone_list) -> str:
+        """Deal-level status of a healthy milestone deal mid-stream."""
+        for m in milestone_list:
+            if m["status"] == "released":
+                return "partially_settled"
+        return "funded"
+
+    def _require_current_milestone(self, milestone_list, idx: int) -> dict:
+        """
+        Bounds-check `idx` and enforce the sequential rule — all earlier
+        milestones must already be released. Returns the milestone dict.
+        """
+        if idx < 0 or idx >= len(milestone_list):
+            gl.rollback("Milestone index out of range")
+        for i in range(idx):
+            if milestone_list[i]["status"] != "released":
+                gl.rollback("Earlier milestones must be released first")
+        return milestone_list[idx]
 
     def _add_user_deal(self, user: Address, deal_id: u256):
         """Track deal ID in user's deal history (capped to prevent bloat)."""

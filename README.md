@@ -91,12 +91,15 @@ Open `http://localhost:3000`, connect your wallet, and create your first deal.
 
 | Method | Description |
 |--------|-------------|
-| `create_deal(terms, price_description, deadline_description, verification_urls)` | Seller creates a deal with natural language terms |
+| `create_deal(terms, price_description, deadline_description, verification_urls, min_sources_required, milestones)` | Seller creates a deal with natural language terms; `milestones` is `""` for a classic deal or a JSON milestone schedule |
 | `fund_deal(deal_id)` | Buyer deposits funds into escrow |
-| `submit_evidence(deal_id, evidence_type, evidence_url, description)` | Either party submits proof |
-| `request_verification(deal_id)` | Triggers AI verification by validators |
-| `settle_deal(deal_id)` | Releases funds to seller after verification |
-| `claim_refund(deal_id)` | Buyer reclaims funds from a rejected deal |
+| `submit_evidence(deal_id, evidence_type, evidence_url, description)` | Either party submits proof (classic deals) |
+| `request_verification(deal_id)` | Triggers AI verification by validators (classic deals) |
+| `settle_deal(deal_id)` | Releases funds to seller after verification (classic deals) |
+| `submit_milestone_evidence(deal_id, milestone_index, evidence_type, evidence_url, description)` | Either party submits proof for the current milestone |
+| `request_milestone_verification(deal_id, milestone_index)` | Triggers AI verification of one milestone's condition |
+| `settle_milestone(deal_id, milestone_index)` | Releases one verified milestone's share to the seller |
+| `claim_refund(deal_id)` | Buyer reclaims funds from a rejected deal (milestone deals refund the unreleased remainder) |
 | `cancel_deal(deal_id)` | Seller cancels an unfunded deal |
 
 ### Read Methods
@@ -123,12 +126,38 @@ cancelled                                    rejected --> refunded
                                             disputed (escalates)
 ```
 
+Milestone deals skip `evidence_submitted`/`verified` at the deal level and instead
+move through `funded --> partially_settled --> settled` as each milestone releases:
+
+```
+open --> funded --> partially_settled --> ... --> settled
+             \            \
+              \            v
+               +----> rejected --> refunded   (unreleased remainder to buyer)
+               |          ^
+               v          |
+             disputed ----+  (re-verify the contested milestone)
+```
+
+### Milestone deals
+
+A seller can attach an optional milestone schedule at creation: 2–10 phases, each
+with its own plain-English condition and a share of the price in basis points
+(shares must total exactly 10000). The buyer still funds the full amount once; wei
+amounts are frozen at fund time with the last milestone absorbing rounding dust.
+Milestones are verified and released **strictly in order** — evidence, verification,
+and release always target the first non-released milestone. If a milestone is
+rejected, released funds stay with the seller and the buyer refunds the remainder;
+any seller bond is slashed pro-rata to the undelivered share (split 50/50
+buyer/protocol), with the delivered share's portion returned to the seller.
+
 ### Status Definitions
 
 - **open** — Deal listed, waiting for buyer to fund
 - **funded** — Buyer has deposited, escrow is active
 - **evidence_submitted** — One or both parties have submitted proof
 - **verified** — AI validators confirm conditions are met
+- **partially_settled** — Milestone deal with at least one phase released, more to go
 - **settled** — Funds released to seller, deal complete
 - **rejected** — AI validators determine conditions are not met
 - **refunded** — Buyer has reclaimed funds from a rejected deal
@@ -161,7 +190,7 @@ The LLM prompt is designed to be rigorous: it only returns `conditions_met: true
 
 ## Growth Roadmap
 
-- Multi-milestone deals with partial fund releases
+- ~~Multi-milestone deals with partial fund releases~~ ✓ shipped
 - Reputation scoring based on completed deal history
 - Invoice factoring module for business-to-business finance
 - Escrow templates for common trade types (freelance, commodity, digital goods)
