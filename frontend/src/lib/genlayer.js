@@ -158,3 +158,29 @@ export async function checkDeadline(walletAddress, provider, dealId) {
   const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "check_deadline", args: [dealId], value: 0n });
   return await waitForTx(writeClient, hash);
 }
+
+// Sign one of "release" | "split" | "refund" on a deal the tribunal can't
+// finish. Two matching signatures execute; a single one only records a ballot,
+// so this returns successfully either way — read `resolution_seller` /
+// `resolution_buyer` back off the deal to see which happened.
+export async function proposeResolution(walletAddress, provider, dealId, outcome) {
+  const { writeClient } = await getClients(walletAddress, provider);
+  if (!writeClient) throw new Error("Wallet not connected");
+  const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "propose_resolution", args: [dealId, outcome], value: 0n });
+  return await waitForTx(writeClient, hash);
+}
+
+// The pull half of the payout ledger: every finalizer credits `payouts`, and
+// the payee calls this to actually receive the wei. Reverts if nothing is owed.
+export async function withdraw(walletAddress, provider) {
+  const { writeClient } = await getClients(walletAddress, provider);
+  if (!writeClient) throw new Error("Wallet not connected");
+  const hash = await writeClient.writeContract({ address: CONTRACT_ADDRESS, functionName: "withdraw", args: [], value: 0n });
+  return await waitForTx(writeClient, hash);
+}
+
+// Wei owed to an address, as a decimal string.
+export async function fetchPayout(address) {
+  const { readClient } = await getClients();
+  return await readClient.readContract({ address: CONTRACT_ADDRESS, functionName: "get_payout", args: [address], stateStatus: "accepted" });
+}
