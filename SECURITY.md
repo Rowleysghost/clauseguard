@@ -199,19 +199,24 @@ GenVM, not the GenVM.
 
 ## What's intentionally still loose
 
-- **The contract file is ahead of the deployed bytecode.** `contracts/clauseguard.py`
-  now has `payouts`, the three counters, `withdraw()`, payable
-  `create_deal` / `fund_deal`, `propose_resolution` with its two ballot fields and
-  the terminal `resolved` status, and the reason-code vocabularies. The contract
-  live at
-  `0xE71C283aaA3A5f1cC3E12d126Fd13e8059F4b54F` has none of it. GenLayer contracts
-  are immutable, so this needs a fresh deploy (see the redeploy checklist in
-  `CLAUDE.md`) before any of it is reachable from the frontend. The frontend now
-  carries the matching UI: a `resolved` stamp, the settlement-by-consent signing
-  panel, and a "collect funds" banner driven by `get_payout`. All of it
-  degrades to nothing against a contract that lacks those methods, because the
-  reads are wrapped and the affordances are keyed off status values the old
-  contract never writes.
+- **The contract shipped; the UI that pays people didn't.** `contracts/clauseguard.py`
+  is deployed at `0x9F6a2b9747628414f9b16f6c3e7877eb9bd2942D` on studionet, verified
+  2026-08-24: the on-chain schema carries all 23 public methods with nothing missing,
+  including `payouts` and its three counters, `withdraw()`, payable
+  `create_deal` / `fund_deal`, `propose_resolution` with both ballot fields and terminal
+  `resolved`, and the reason-code vocabularies. The earlier deploy at
+  `0xE71C283aaA3A5f1cC3E12d126Fd13e8059F4b54F` has none of that and is abandoned.
+
+  The exposure now sits on the frontend. Production builds from `main`, which predates
+  `proposeResolution` / `withdraw` / `fetchPayout` and the UI they feed. Because the
+  contract pays out only through `withdraw()`, a deal that settles or refunds on
+  production credits the ledger and leaves the payee with no button to press; the wei is
+  recoverable, but only by calling `withdraw()` outside the app. `propose_resolution` is
+  reachable on-chain and unreachable from the site, so a `disputed` deal has no escape
+  route in the shipped build. Value still enters correctly, since `main` sends the bond
+  on create and `price + collateral` on fund. The contract is empty today (0 deals,
+  0 wei, all counters zero), so nothing is stuck; merging the frontend branch before the
+  first real deal is what keeps it that way.
 - **No domain whitelist** for evidence or verification URLs. Length and count caps are the current defense; if a domain whitelist is ever introduced, it likely belongs at the frontend `create_deal` / `submit_evidence` step, not in the contract, because trust is per-deal.
 - **Sybil resistance** is out of scope for the contract. Anyone evaluating a counterparty should treat reputation as off-chain context.
 
