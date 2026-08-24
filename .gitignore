@@ -14,3 +14,6 @@ clause guard-handoff.zip
 
 # Claude Code local instructions (not for GitHub)
 CLAUDE.md
+
+# Claude Code local settings + editor launch config (machine-specific)
+.claude/

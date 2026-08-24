@@ -23,6 +23,125 @@ MAX_DEALS_PER_USER = 500
 MAX_PAGE_SIZE = 100
 
 
+# ── Mutual resolution ──────────────────────────────────
+# Statuses that hold wei but have no finalizer of their own. `disputed` is
+# where a deal lands after MAX_VERIFICATION_ATTEMPTS low-confidence verdicts;
+# `funded` and `evidence_submitted` are where a deal sits when nobody submits
+# evidence and the LLM won't call a relative deadline expired. Without an
+# escape route the escrowed wei stays locked forever (N8).
+RESOLVABLE_STATUSES = ("funded", "evidence_submitted", "disputed")
+# Both parties must sign the SAME outcome for it to execute. `split` exists so
+# a partial-delivery dispute has a landing spot both sides can converge on —
+# with only release/refund on offer, each party holds out for the whole pot and
+# the deal stays stuck.
+RESOLUTION_OUTCOMES = ("release", "refund", "split")
+
+
+# ── Verdict vocabulary ─────────────────────────────────
+# Whatever a nondet block returns is the value `gl.eq_principle.strict_eq`
+# compares byte for byte across the validator set. Free-text prose cannot
+# survive that comparison: two validators reaching the same judgment word their
+# explanation differently, the bytes differ, consensus fails, and no verdict is
+# ever recorded. So the model picks from closed sets, the contract coerces
+# anything off-vocabulary back onto them, and the human-readable sentence is
+# composed afterwards from the agreed code — a dict lookup every validator
+# performs identically. That is the whole of N11.
+CONFIDENCE_LEVELS = ("high", "medium", "low")
+
+VERDICT_REASON_CODES = (
+    "all_conditions_confirmed",
+    "evidence_insufficient",
+    "evidence_contradicted",
+    "insufficient_independent_sources",
+    "evidence_unfetchable",
+    "terms_ambiguous",
+    "deadline_passed",
+    "verification_error",
+)
+
+# Codes the model may list as still outstanding: the same vocabulary minus the
+# one code that means nothing is outstanding.
+UNMET_CONDITION_CODES = (
+    "evidence_insufficient",
+    "evidence_contradicted",
+    "insufficient_independent_sources",
+    "evidence_unfetchable",
+    "terms_ambiguous",
+    "deadline_passed",
+    "verification_error",
+)
+
+DEADLINE_REASON_CODES = (
+    "deadline_passed",
+    "deadline_not_reached",
+    "deadline_indeterminate",
+    "time_source_unavailable",
+    "verification_error",
+)
+
+# The prose, written into `verdict_details` after consensus. Never compared.
+REASON_TEXT = {
+    "all_conditions_confirmed": "Every condition in the terms is confirmed by the submitted evidence.",
+    "evidence_insufficient": "The evidence does not cover every condition in the terms.",
+    "evidence_contradicted": "The web content contradicts a claim made in the submitted evidence.",
+    "insufficient_independent_sources": "Fewer independent sources confirmed the conditions than this deal requires.",
+    "evidence_unfetchable": "One or more evidence URLs could not be retrieved for review.",
+    "terms_ambiguous": "The terms are too ambiguous to judge against the evidence provided.",
+    "deadline_passed": "The deal deadline expired before the conditions were met.",
+    "verification_error": "The verification result could not be read.",
+    "deadline_not_reached": "The deadline has not passed as of the time source consulted.",
+    "deadline_indeterminate": "The deadline is relative and no absolute date could be derived from it.",
+    "time_source_unavailable": "The live time source could not be reached.",
+}
+
+
+def _fail(message: str):
+    """
+    Abort the current call and revert every state change made by it.
+
+    The py-genlayer stdlib has no `gl.rollback`. A user-facing revert is
+    `gl.vm.UserError`, which the runner catches at the entry point and turns
+    into a rollback carrying `message`. Validators compare that message for
+    strict equality, so keep the strings short and deterministic.
+    """
+    raise gl.vm.UserError(message)
+
+
+def _pick(value, allowed: tuple, default: str) -> str:
+    """
+    Coerce a model-supplied string onto a closed vocabulary.
+
+    Anything the model invents — different casing, a synonym, a whole sentence —
+    collapses to `default`, so the compared value can only ever be one of
+    `allowed`. Without this one validator's "Medium" and another's "medium" are
+    a consensus failure, and an unrecognised confidence would route the deal to
+    `rejected` (which slashes half the seller's bond) rather than `disputed`.
+    """
+    candidate = str(value).strip().lower()
+    if candidate in allowed:
+        return candidate
+    return default
+
+
+def _pick_codes(values, allowed: tuple) -> list:
+    """
+    Filter a model-supplied list down to known codes, deduplicated and sorted.
+
+    Sorted because two validators can agree on the same set of unmet conditions
+    and still emit them in a different order, which a byte comparison reads as
+    disagreement.
+    """
+    if not isinstance(values, list):
+        return []
+    picked = []
+    for value in values:
+        code = str(value).strip().lower()
+        if code in allowed and code not in picked:
+            picked.append(code)
+    picked.sort()
+    return picked
+
+
 class ClauseGuard(gl.Contract):
     """
     ClauseGuard: AI-Powered P2P Trade Escrow with Natural Language Terms
@@ -38,14 +157,30 @@ class ClauseGuard(gl.Contract):
     # User deal history: address -> JSON array of deal IDs
     user_deals: TreeMap[Address, str]
 
+    # ── Money ──────────────────────────────────────────────
+    # Wei owed to a party but not yet withdrawn. Finalizing a deal credits
+    # this ledger; it never sends. Each party pulls their own money with
+    # withdraw(), so a payee who cannot receive can only stall themselves.
+    payouts: TreeMap[Address, u256]
+    # Wei held against deals that have not reached a terminal state yet.
+    total_locked: u256
+    # Sum of every outstanding entry in `payouts`.
+    total_credited: u256
+    # Slashed halves of seller bonds. No method pays this out — the wei is
+    # deliberately stranded, which is what "burned" means here.
+    protocol_retained: u256
+
     def __init__(self):
         self.deal_count = u256(0)
+        self.total_locked = u256(0)
+        self.total_credited = u256(0)
+        self.protocol_retained = u256(0)
 
     # ──────────────────────────────────────────────
     # WRITE METHODS
     # ──────────────────────────────────────────────
 
-    @gl.public.write
+    @gl.public.write.payable
     def create_deal(
         self,
         terms: str,
@@ -72,30 +207,30 @@ class ClauseGuard(gl.Contract):
         deal_id = self.deal_count
 
         if not terms.strip():
-            gl.rollback("Terms cannot be empty")
+            _fail("Terms cannot be empty")
         if len(terms) > MAX_TERMS_LEN:
-            gl.rollback("Terms too long")
+            _fail("Terms too long")
         if not price_description.strip():
-            gl.rollback("Price description cannot be empty")
+            _fail("Price description cannot be empty")
         if len(price_description) > MAX_PRICE_LEN:
-            gl.rollback("Price description too long")
+            _fail("Price description too long")
         if not deadline_description.strip():
-            gl.rollback("Deadline description cannot be empty")
+            _fail("Deadline description cannot be empty")
         if len(deadline_description) > MAX_DEADLINE_LEN:
-            gl.rollback("Deadline description too long")
+            _fail("Deadline description too long")
 
         # Cap the raw string before splitting — otherwise a megabyte of commas
         # would expand into a huge list before the count check below.
         if len(verification_urls) > MAX_VERIFICATION_URLS_AT_CREATE * (MAX_URL_LEN + 1):
-            gl.rollback("Verification URLs blob too large")
+            _fail("Verification URLs blob too large")
 
         # Validate verification_urls — comma-separated, capped count and length.
         url_list = [u.strip() for u in verification_urls.split(",") if u.strip()]
         if len(url_list) > MAX_VERIFICATION_URLS_AT_CREATE:
-            gl.rollback("Too many verification URLs")
+            _fail("Too many verification URLs")
         for u in url_list:
             if len(u) > MAX_URL_LEN:
-                gl.rollback("Verification URL too long")
+                _fail("Verification URL too long")
 
         min_src = max(1, int(min_sources_required))
 
@@ -131,14 +266,20 @@ class ClauseGuard(gl.Contract):
             "collateral_amount": str(collateral_amount),
             "buyer_collateral": "0",
             "settlement": "",
+            # Mutual-resolution ballots. Each party's last signed outcome;
+            # empty until they sign one. See propose_resolution.
+            "resolution_seller": "",
+            "resolution_buyer": "",
         }
 
         self.deals[deal_id] = json.dumps(deal)
         self._add_user_deal(gl.message.sender_address, deal_id)
+        # The bond is now held against a live deal.
+        self._lock(collateral_amount)
 
         return deal_id
 
-    @gl.public.write
+    @gl.public.write.payable
     def fund_deal(self, deal_id: u256):
         """
         Buyer funds the deal, locking value in escrow.
@@ -147,16 +288,16 @@ class ClauseGuard(gl.Contract):
         deal = self._get_deal(deal_id)
 
         if deal["status"] != "open":
-            gl.rollback("Deal is not open for funding")
+            _fail("Deal is not open for funding")
 
         if str(gl.message.sender_address) == deal["seller"]:
-            gl.rollback("Seller cannot fund their own deal")
+            _fail("Seller cannot fund their own deal")
 
         # Reject zero-value funding — a 0-wei buyer would block the buyer slot
         # without locking value, griefing the seller.
         value = int(gl.message.value)
         if value <= 0:
-            gl.rollback("Fund amount must be positive")
+            _fail("Fund amount must be positive")
 
         # If the seller posted a collateral bond, the buyer must match it on
         # top of the escrow price. The bond portion is tracked separately so
@@ -165,7 +306,7 @@ class ClauseGuard(gl.Contract):
         collateral = int(deal.get("collateral_amount", "0"))
         if collateral > 0:
             if value <= collateral:
-                gl.rollback("Fund amount must cover the collateral bond plus a positive price")
+                _fail("Fund amount must cover the collateral bond plus a positive price")
             deal["buyer_collateral"] = str(collateral)
             deal["funded_amount"] = str(value - collateral)
         else:
@@ -182,6 +323,9 @@ class ClauseGuard(gl.Contract):
 
         self.deals[deal_id] = json.dumps(deal)
         self._add_user_deal(gl.message.sender_address, deal_id)
+        # Everything the buyer attached — price plus the matched bond — is now
+        # held against a live deal.
+        self._lock(value)
 
     @gl.public.write
     def submit_evidence(self, deal_id: u256, evidence_type: str, evidence_url: str, description: str):
@@ -197,24 +341,24 @@ class ClauseGuard(gl.Contract):
         deal = self._get_deal(deal_id)
 
         if deal["status"] not in ("funded", "evidence_submitted", "disputed"):
-            gl.rollback("Deal must be funded before evidence can be submitted")
+            _fail("Deal must be funded before evidence can be submitted")
 
         sender = str(gl.message.sender_address)
         if sender != deal["seller"] and sender != deal["buyer"]:
-            gl.rollback("Only deal parties can submit evidence")
+            _fail("Only deal parties can submit evidence")
 
         if not evidence_type.strip() or not evidence_url.strip() or not description.strip():
-            gl.rollback("Evidence fields cannot be empty")
+            _fail("Evidence fields cannot be empty")
         if len(evidence_type) > MAX_DESCRIPTION_LEN:
-            gl.rollback("Evidence type too long")
+            _fail("Evidence type too long")
         if len(evidence_url) > MAX_URL_LEN:
-            gl.rollback("Evidence URL too long")
+            _fail("Evidence URL too long")
         if len(description) > MAX_DESCRIPTION_LEN:
-            gl.rollback("Description too long")
+            _fail("Description too long")
 
         evidence_list = json.loads(deal["evidence"])
         if len(evidence_list) >= MAX_EVIDENCE_ITEMS:
-            gl.rollback("Maximum evidence items reached for this deal")
+            _fail("Maximum evidence items reached for this deal")
         evidence_list.append({
             "submitted_by": sender,
             "type": evidence_type,
@@ -245,16 +389,16 @@ class ClauseGuard(gl.Contract):
         deal = self._get_deal(deal_id)
 
         if deal["status"] not in ("evidence_submitted", "disputed"):
-            gl.rollback("Evidence must be submitted before verification")
+            _fail("Evidence must be submitted before verification")
 
         sender = str(gl.message.sender_address)
         if sender != deal["seller"] and sender != deal["buyer"]:
-            gl.rollback("Only deal parties can request verification")
+            _fail("Only deal parties can request verification")
 
         # Cap re-verification attempts so a disputed deal cannot loop forever.
         attempts = int(deal.get("verification_attempts", "0")) + 1
         if attempts > MAX_VERIFICATION_ATTEMPTS:
-            gl.rollback("Maximum verification attempts reached — escalate dispute off-chain")
+            _fail("Maximum verification attempts reached — escalate dispute off-chain")
         deal["verification_attempts"] = str(attempts)
 
         # Collect all URLs to check
@@ -265,7 +409,7 @@ class ClauseGuard(gl.Contract):
         # Cap total URL count — each entry triggers a web crawl during
         # gl.eq_principle.strict_eq and is the dominant compute cost.
         if len(all_urls) > MAX_URLS_PER_VERIFICATION:
-            gl.rollback("Too many URLs for one verification — reduce evidence count")
+            _fail("Too many URLs for one verification — reduce evidence count")
 
         min_sources = int(deal.get("min_sources_required", "1"))
         is_redispatch = deal["status"] == "disputed"
@@ -343,30 +487,60 @@ You MUST respond with ONLY a valid JSON object in this exact format:
 {{
     "conditions_met": true or false,
     "confidence": "high" or "medium" or "low",
-    "reasoning": "A clear 2-3 sentence explanation of your assessment",
-    "unmet_conditions": ["list of any conditions not yet satisfied, or empty array"]
+    "reason_code": "one code from the list below",
+    "unmet_conditions": ["zero or more codes from the list below, excluding all_conditions_confirmed"]
 }}
+
+REASON CODES — use these exact strings and no others:
+- all_conditions_confirmed: every condition is satisfied by the evidence
+- evidence_insufficient: the evidence does not cover every condition
+- evidence_contradicted: the web content contradicts the submitted evidence
+- insufficient_independent_sources: fewer independent sources than this deal requires
+- evidence_unfetchable: an evidence URL could not be retrieved
+- terms_ambiguous: the terms cannot be judged as written
+- deadline_passed: the deadline expired before the conditions were met
+- verification_error: you cannot produce a judgment from what you were given
+
+Do not write any prose. Every validator in the network runs this judgment
+independently and the answers are compared byte for byte, so a free-text
+explanation differs between validators and the comparison fails. Codes only.
 
 Be rigorous. Only return conditions_met: true if ALL terms are clearly satisfied
 by the evidence. If any condition is ambiguous or unverified, return false."""
 
             result = gl.nondet.exec_prompt(prompt)
 
-            # Parse and normalize for consensus
+            # Every field below is drawn from a closed set, so two validators
+            # that reach the same judgment produce identical bytes no matter how
+            # differently their models phrase things. Any prose the model wrote
+            # anyway is dropped here rather than compared (N11).
             try:
                 parsed = json.loads(result)
+                conditions_met = bool(parsed.get("conditions_met", False))
+                # A missing or invented code falls back to the one implied by
+                # the judgment itself, which is always in the vocabulary.
+                fallback = (
+                    "all_conditions_confirmed" if conditions_met
+                    else "evidence_insufficient"
+                )
                 normalized = {
-                    "conditions_met": bool(parsed.get("conditions_met", False)),
-                    "confidence": str(parsed.get("confidence", "low")),
-                    "reasoning": str(parsed.get("reasoning", "")),
-                    "unmet_conditions": list(parsed.get("unmet_conditions", []))
+                    "conditions_met": conditions_met,
+                    "confidence": _pick(
+                        parsed.get("confidence", "low"), CONFIDENCE_LEVELS, "low"
+                    ),
+                    "reason_code": _pick(
+                        parsed.get("reason_code", ""), VERDICT_REASON_CODES, fallback
+                    ),
+                    "unmet_conditions": _pick_codes(
+                        parsed.get("unmet_conditions", []), UNMET_CONDITION_CODES
+                    ),
                 }
                 return json.dumps(normalized, sort_keys=True)
             except (json.JSONDecodeError, KeyError):
                 return json.dumps({
                     "conditions_met": False,
                     "confidence": "low",
-                    "reasoning": "Failed to parse verification result",
+                    "reason_code": "verification_error",
                     "unmet_conditions": ["verification_error"]
                 }, sort_keys=True)
 
@@ -374,9 +548,19 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         verdict_json = gl.eq_principle.strict_eq(verify_conditions)
         verdict = json.loads(verdict_json)
 
-        # Update deal based on verdict
+        # Update deal based on verdict. The readable sentence is composed here,
+        # outside the equivalence principle, from the code the validators agreed
+        # on — the same lookup on every validator, so the state write stays
+        # deterministic without any prose having crossed the comparison.
+        reason_code = verdict["reason_code"]
         deal["verdict"] = "approved" if verdict["conditions_met"] else "rejected"
-        deal["verdict_details"] = json.dumps(verdict)
+        deal["verdict_details"] = json.dumps({
+            "conditions_met": verdict["conditions_met"],
+            "confidence": verdict["confidence"],
+            "reason_code": reason_code,
+            "reasoning": REASON_TEXT.get(reason_code, ""),
+            "unmet_conditions": verdict["unmet_conditions"],
+        })
 
         if verdict["conditions_met"]:
             deal["status"] = "verified"
@@ -401,19 +585,19 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         deal = self._get_deal(deal_id)
 
         if deal["status"] not in ("open", "funded"):
-            gl.rollback("Counter-terms can only be proposed for open or funded deals")
+            _fail("Counter-terms can only be proposed for open or funded deals")
 
         sender = str(gl.message.sender_address)
         if sender == deal["seller"]:
-            gl.rollback("Seller cannot propose counter-terms to their own deal")
+            _fail("Seller cannot propose counter-terms to their own deal")
 
         if deal["status"] == "funded" and sender != deal["buyer"]:
-            gl.rollback("Only the buyer can propose counter-terms for a funded deal")
+            _fail("Only the buyer can propose counter-terms for a funded deal")
 
         if not new_terms.strip():
-            gl.rollback("Counter-terms cannot be empty")
+            _fail("Counter-terms cannot be empty")
         if len(new_terms) > MAX_TERMS_LEN:
-            gl.rollback("Counter-terms too long")
+            _fail("Counter-terms too long")
 
         # On an open deal, only one pending proposal at a time. The first
         # would-be buyer claims the slot; otherwise a hostile non-party could
@@ -423,7 +607,7 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         if deal["status"] == "open":
             existing_from = deal.get("pending_terms_from", "")
             if existing_from and existing_from != sender:
-                gl.rollback("Another party has a pending counter-terms proposal")
+                _fail("Another party has a pending counter-terms proposal")
 
         deal["pending_terms"] = new_terms.strip()
         deal["pending_terms_from"] = sender
@@ -437,23 +621,23 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         deal = self._get_deal(deal_id)
 
         if not deal.get("pending_terms", ""):
-            gl.rollback("No pending counter-terms to accept")
+            _fail("No pending counter-terms to accept")
 
         sender = str(gl.message.sender_address)
         if sender != deal["seller"]:
-            gl.rollback("Only the seller can accept counter-terms")
+            _fail("Only the seller can accept counter-terms")
 
         # Counter-terms can only be accepted while the deal is still in a
         # negotiable state. Without this the seller could accept stale
         # proposals after evidence/verification, rewriting terms retroactively.
         if deal["status"] not in ("open", "funded"):
-            gl.rollback("Counter-terms can only be accepted for open or funded deals")
+            _fail("Counter-terms can only be accepted for open or funded deals")
 
         # If a buyer has funded, the proposal must come from that buyer —
         # otherwise the seller could bind the buyer's locked funds to terms
         # proposed by a third party (the counter-terms hijack).
         if deal["status"] == "funded" and deal.get("pending_terms_from", "") != deal["buyer"]:
-            gl.rollback("Pending counter-terms were not proposed by the current buyer")
+            _fail("Pending counter-terms were not proposed by the current buyer")
 
         deal["terms"] = deal["pending_terms"]
         deal["pending_terms"] = ""
@@ -468,11 +652,11 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         deal = self._get_deal(deal_id)
 
         if not deal.get("pending_terms", ""):
-            gl.rollback("No pending counter-terms to reject")
+            _fail("No pending counter-terms to reject")
 
         sender = str(gl.message.sender_address)
         if sender != deal["seller"]:
-            gl.rollback("Only the seller can reject counter-terms")
+            _fail("Only the seller can reject counter-terms")
 
         deal["pending_terms"] = ""
         deal["pending_terms_from"] = ""
@@ -490,11 +674,11 @@ by the evidence. If any condition is ambiguous or unverified, return false."""
         deal = self._get_deal(deal_id)
 
         if deal["status"] not in ("funded", "evidence_submitted"):
-            gl.rollback("Deadline can only be checked for funded deals")
+            _fail("Deadline can only be checked for funded deals")
 
         sender = str(gl.message.sender_address)
         if sender != deal["seller"] and sender != deal["buyer"]:
-            gl.rollback("Only deal parties can check the deadline")
+            _fail("Only deal parties can check the deadline")
 
         deadline_desc = deal["deadline_description"]
 
@@ -528,20 +712,28 @@ Rules:
 Respond with ONLY a valid JSON object:
 {{
     "deadline_passed": true or false,
-    "reasoning": "1-2 sentence explanation referencing the current date and deadline"
-}}"""
+    "reason_code": one of "deadline_passed", "deadline_not_reached",
+                   "deadline_indeterminate", "time_source_unavailable"
+}}
+
+Codes only, no prose. Every validator runs this check independently and the
+answers are compared byte for byte, so a written explanation breaks consensus."""
 
             result = gl.nondet.exec_prompt(prompt)
             try:
                 parsed = json.loads(result)
+                passed = bool(parsed.get("deadline_passed", False))
+                fallback = "deadline_passed" if passed else "deadline_indeterminate"
                 return json.dumps({
-                    "deadline_passed": bool(parsed.get("deadline_passed", False)),
-                    "reasoning": str(parsed.get("reasoning", ""))
+                    "deadline_passed": passed,
+                    "reason_code": _pick(
+                        parsed.get("reason_code", ""), DEADLINE_REASON_CODES, fallback
+                    )
                 }, sort_keys=True)
             except (json.JSONDecodeError, KeyError):
                 return json.dumps({
                     "deadline_passed": False,
-                    "reasoning": "Failed to parse deadline check result"
+                    "reason_code": "verification_error"
                 }, sort_keys=True)
 
         result_json = gl.eq_principle.strict_eq(check)
@@ -553,7 +745,8 @@ Respond with ONLY a valid JSON object:
             deal["verdict_details"] = json.dumps({
                 "conditions_met": False,
                 "confidence": "high",
-                "reasoning": "Deadline expired. " + result.get("reasoning", ""),
+                "reason_code": "deadline_passed",
+                "reasoning": REASON_TEXT["deadline_passed"],
                 "unmet_conditions": ["deadline_passed"]
             })
             self.deals[deal_id] = json.dumps(deal)
@@ -567,28 +760,37 @@ Respond with ONLY a valid JSON object:
         deal = self._get_deal(deal_id)
 
         if deal["status"] != "verified":
-            gl.rollback("Deal must be verified before settlement")
+            _fail("Deal must be verified before settlement")
 
         sender = str(gl.message.sender_address)
         if sender != deal["seller"] and sender != deal["buyer"]:
-            gl.rollback("Only deal parties can settle")
+            _fail("Only deal parties can settle")
 
         # Cooperative outcome — conditions met. Price goes to the seller and
         # BOTH good-faith bonds are returned to their owners.
+        price = int(deal["funded_amount"])
         seller_bond = int(deal.get("collateral_amount", "0"))
         buyer_bond = int(deal.get("buyer_collateral", "0"))
-        # In production:
-        # gl.transfer(Address(deal["seller"]), u256(int(deal["funded_amount"]) + seller_bond))
-        # if buyer_bond > 0:
-        #     gl.transfer(Address(deal["buyer"]), u256(buyer_bond))
+        to_seller = price + seller_bond
+        to_buyer = buyer_bond
 
+        # Terminal status is written before a single wei moves anywhere, so a
+        # second settle_deal on the same id hits the status guard above.
         deal["status"] = "settled"
         deal["settlement"] = json.dumps({
             "price_to": "seller",
             "seller_collateral": "returned",
             "buyer_collateral": "returned",
+            "credited_seller": str(to_seller),
+            "credited_buyer": str(to_buyer),
         })
         self.deals[deal_id] = json.dumps(deal)
+
+        # Move the escrowed wei out of `locked` and onto the payout ledger.
+        # Nothing is sent here — both parties pull with withdraw().
+        self._release(to_seller + to_buyer)
+        self._credit(deal["seller"], to_seller)
+        self._credit(deal["buyer"], to_buyer)
 
     @gl.public.write
     def claim_refund(self, deal_id: u256):
@@ -598,11 +800,11 @@ Respond with ONLY a valid JSON object:
         deal = self._get_deal(deal_id)
 
         if deal["status"] != "rejected":
-            gl.rollback("Deal must be rejected to claim refund")
+            _fail("Deal must be rejected to claim refund")
 
         sender = str(gl.message.sender_address)
         if sender != deal["buyer"]:
-            gl.rollback("Only buyer can claim refund")
+            _fail("Only buyer can claim refund")
 
         # Conditions were not met (or the deadline expired). The seller failed
         # to see the deal through, so the buyer is made whole on the escrow
@@ -610,15 +812,14 @@ Respond with ONLY a valid JSON object:
         # paid to the buyer as compensation for the wasted deal, half is
         # retained by the protocol (burned). Capping the buyer's share removes
         # any incentive to angle for a rejection just to capture the bond.
+        price = int(deal["funded_amount"])
         seller_bond = int(deal.get("collateral_amount", "0"))
         buyer_bond = int(deal.get("buyer_collateral", "0"))
         # Integer split — the buyer never gets more than half; any odd wei
         # rounds to the protocol side.
         seller_to_buyer = seller_bond // 2
         seller_to_protocol = seller_bond - seller_to_buyer
-        # In production:
-        # gl.transfer(gl.message.sender_address, u256(int(deal["funded_amount"]) + buyer_bond + seller_to_buyer))
-        # seller_to_protocol stays in the contract (protocol-retained / burned)
+        to_buyer = price + buyer_bond + seller_to_buyer
 
         deal["status"] = "refunded"
         deal["settlement"] = json.dumps({
@@ -627,8 +828,15 @@ Respond with ONLY a valid JSON object:
             "seller_collateral_to_buyer": str(seller_to_buyer),
             "seller_collateral_to_protocol": str(seller_to_protocol),
             "buyer_collateral": "returned" if buyer_bond > 0 else "none",
+            "credited_buyer": str(to_buyer),
         })
         self.deals[deal_id] = json.dumps(deal)
+
+        # Everything locked against this deal leaves `locked`: the buyer's
+        # share lands on the payout ledger, the slashed half is stranded.
+        self._release(price + seller_bond + buyer_bond)
+        self._credit(deal["buyer"], to_buyer)
+        self._retain(seller_to_protocol)
 
     @gl.public.write
     def cancel_deal(self, deal_id: u256):
@@ -638,24 +846,110 @@ Respond with ONLY a valid JSON object:
         deal = self._get_deal(deal_id)
 
         if deal["status"] != "open":
-            gl.rollback("Can only cancel open (unfunded) deals")
+            _fail("Can only cancel open (unfunded) deals")
 
         sender = str(gl.message.sender_address)
         if sender != deal["seller"]:
-            gl.rollback("Only seller can cancel their deal")
+            _fail("Only seller can cancel their deal")
 
         # No buyer was ever bound, so the seller's good-faith bond (if any) is
-        # returned in full.
+        # returned in full. An `open` deal holds nothing but that bond.
         seller_bond = int(deal.get("collateral_amount", "0"))
-        # In production:
-        # if seller_bond > 0:
-        #     gl.transfer(Address(deal["seller"]), u256(seller_bond))
 
         deal["status"] = "cancelled"
         deal["settlement"] = json.dumps({
             "seller_collateral": "returned" if seller_bond > 0 else "none",
+            "credited_seller": str(seller_bond),
         })
         self.deals[deal_id] = json.dumps(deal)
+
+        self._release(seller_bond)
+        self._credit(deal["seller"], seller_bond)
+
+    @gl.public.write
+    def propose_resolution(self, deal_id: u256, outcome: str):
+        """
+        Sign a mutually-agreed ending for a deal the AI can't finish.
+
+        A deal in `disputed` (three low-confidence verdicts) or stuck in
+        `funded` / `evidence_submitted` (no evidence, and a relative deadline
+        the LLM won't call expired) has no finalizer, so its wei stays locked
+        forever. This is the escape route: each party signs one of
+        `release` / `refund` / `split`, and the deal executes the moment both
+        signatures match. Either side may sign first, and re-signing replaces
+        your previous choice.
+
+        Nothing here can be done unilaterally. One signature only records a
+        ballot; the counterparty's matching signature is what moves money. That
+        is deliberate — a unilateral exit from `funded` would let a buyer pull
+        their funds back after the seller had already shipped.
+
+        Unlike `claim_refund`, no bond is slashed. A mutual agreement isn't an
+        adjudicated breach, so both bonds go home intact. That also makes
+        cooperating strictly cheaper for a seller than stalling: sign `refund`
+        and keep your whole bond, or sit in `disputed` and reach a
+        `claim_refund` that costs you half of it.
+
+        Args:
+            deal_id: The deal to resolve
+            outcome: "release" (price to seller), "refund" (price to buyer),
+                     or "split" (price halved, odd wei to the buyer)
+        """
+        deal = self._get_deal(deal_id)
+
+        if deal["status"] not in RESOLVABLE_STATUSES:
+            _fail("Deal is not in a resolvable state")
+
+        sender = str(gl.message.sender_address)
+        is_seller = sender == deal["seller"]
+        is_buyer = sender == deal["buyer"]
+        if not is_seller and not is_buyer:
+            _fail("Only deal parties can propose a resolution")
+
+        choice = outcome.strip().lower()
+        if choice not in RESOLUTION_OUTCOMES:
+            _fail("Unknown resolution outcome")
+
+        if is_seller:
+            deal["resolution_seller"] = choice
+        else:
+            deal["resolution_buyer"] = choice
+
+        seller_choice = deal.get("resolution_seller", "")
+        buyer_choice = deal.get("resolution_buyer", "")
+
+        # One side has signed, or the two disagree. Record the ballot and stop —
+        # the deal stays exactly where it was, holding exactly what it held.
+        if not seller_choice or seller_choice != buyer_choice:
+            self.deals[deal_id] = json.dumps(deal)
+            return
+
+        self._execute_resolution(deal_id, deal, seller_choice)
+
+    @gl.public.write
+    def withdraw(self):
+        """
+        Pull whatever the caller is owed. This is the only method in the
+        contract that sends value out.
+
+        Finalizing a deal never sends — it credits `payouts`. Parties collect
+        here, on their own initiative, which means a payee whose address cannot
+        receive value can only ever stall their own money. They cannot wedge a
+        counterparty's settlement.
+        """
+        sender = gl.message.sender_address
+        amount = int(self.payouts.get(sender, u256(0)))
+
+        if amount <= 0:
+            _fail("Nothing to withdraw")
+
+        # Zero the ledger BEFORE emitting the transfer. A re-entrant call finds
+        # an empty balance, and if anything downstream raises, the whole
+        # transaction reverts together — including this zeroing.
+        self.payouts[sender] = u256(0)
+        self.total_credited = u256(int(self.total_credited) - amount)
+
+        self._send(sender, amount)
 
     # ──────────────────────────────────────────────
     # VIEW METHODS
@@ -709,6 +1003,47 @@ Respond with ONLY a valid JSON object:
         """
         return self._scan_deals(int(offset), int(limit), status_filter=None)
 
+    @gl.public.view
+    def get_payout(self, user_address: Address) -> str:
+        """
+        Wei currently owed to `user_address` and not yet withdrawn, as a
+        decimal string (same convention as every other number this contract
+        returns).
+        """
+        return str(int(self.payouts.get(user_address, u256(0))))
+
+    @gl.public.view
+    def get_accounting(self) -> str:
+        """
+        The three money counters, as decimal strings.
+
+        The contract's balance should always equal their sum:
+        `locked + credited + protocol_retained`. Every wei is either held
+        against a live deal, owed to somebody, or stranded. Deliberately does
+        not read the chain balance — see get_contract_balance.
+        """
+        return json.dumps({
+            "total_locked": str(int(self.total_locked)),
+            "total_credited": str(int(self.total_credited)),
+            "protocol_retained": str(int(self.protocol_retained)),
+            "expected_balance": str(
+                int(self.total_locked)
+                + int(self.total_credited)
+                + int(self.protocol_retained)
+            ),
+        })
+
+    @gl.public.view
+    def get_contract_balance(self) -> str:
+        """
+        The contract's actual native balance in wei, as a decimal string.
+
+        Kept separate from get_accounting so that a runtime which won't hand
+        out the self-balance in a read-only call can still serve the counters.
+        Compare the two to audit the invariant from outside.
+        """
+        return str(int(self.balance))
+
     # ──────────────────────────────────────────────
     # INTERNAL HELPERS
     # ──────────────────────────────────────────────
@@ -720,7 +1055,7 @@ Respond with ONLY a valid JSON object:
         except KeyError:
             raw = ""
         if not raw:
-            gl.rollback("Deal not found")
+            _fail("Deal not found")
         return json.loads(raw)
 
     def _add_user_deal(self, user: Address, deal_id: u256):
@@ -761,3 +1096,126 @@ Respond with ONLY a valid JSON object:
             except (KeyError, json.JSONDecodeError):
                 continue
         return json.dumps(result)
+
+    def _execute_resolution(self, deal_id: u256, deal: dict, outcome: str):
+        """
+        Carry out an outcome both parties signed. Called only from
+        `propose_resolution`, only once both ballots match.
+
+        Splits the escrow price per the agreed outcome and returns both bonds
+        to their owners. Nothing is slashed and nothing is retained: the wei
+        released from `locked` is credited back out in full, so the balance
+        invariant holds for every outcome without a rounding remainder.
+        """
+        price = int(deal["funded_amount"])
+        seller_bond = int(deal.get("collateral_amount", "0"))
+        buyer_bond = int(deal.get("buyer_collateral", "0"))
+
+        if outcome == "release":
+            price_to_seller = price
+        elif outcome == "refund":
+            price_to_seller = 0
+        else:
+            # Odd wei goes to the buyer — it's their money in escrow, so they
+            # hold the residual claim on anything the halving can't divide.
+            price_to_seller = price // 2
+
+        # Derived by subtraction rather than computed independently, so the two
+        # shares always add back to `price` exactly.
+        price_to_buyer = price - price_to_seller
+        to_seller = price_to_seller + seller_bond
+        to_buyer = price_to_buyer + buyer_bond
+
+        # Terminal status lands before any accounting moves, same as the other
+        # finalizers: a replay hits the RESOLVABLE_STATUSES guard above.
+        # `resolved` is its own status rather than a reused `settled`/`refunded`
+        # so the audit trail keeps mutual endings distinct from AI-adjudicated
+        # ones, and so no existing finalizer will touch the deal again.
+        deal["status"] = "resolved"
+        deal["settlement"] = json.dumps({
+            "resolution": outcome,
+            "via": "mutual_agreement",
+            "seller_collateral": "returned" if seller_bond > 0 else "none",
+            "buyer_collateral": "returned" if buyer_bond > 0 else "none",
+            "price_to_seller": str(price_to_seller),
+            "price_to_buyer": str(price_to_buyer),
+            "credited_seller": str(to_seller),
+            "credited_buyer": str(to_buyer),
+        })
+        self.deals[deal_id] = json.dumps(deal)
+
+        self._release(price + seller_bond + buyer_bond)
+        self._credit(deal["seller"], to_seller)
+        self._credit(deal["buyer"], to_buyer)
+
+    # ── Money helpers ──────────────────────────────────────    # These four maintain the invariant
+    #     balance == total_locked + total_credited + protocol_retained
+    # by only ever moving wei between the three buckets, never inventing it.
+    # All arithmetic is done in plain Python `int` and converted back at the
+    # storage boundary: `u256` is a NewType with no runtime checking, but the
+    # storage layer raises OverflowError on a negative write, so the explicit
+    # guards below are what turn a bug into a readable revert.
+
+    def _lock(self, amount: int):
+        """Record wei attached to a call as held against a live deal."""
+        if amount < 0:
+            _fail("Accounting error: negative lock")
+        if amount == 0:
+            return
+        self.total_locked = u256(int(self.total_locked) + amount)
+
+    def _release(self, amount: int):
+        """
+        Move wei out of the locked bucket as a deal reaches a terminal state.
+        The caller is responsible for crediting or retaining the same total.
+
+        The guard is unreachable if the accounting above it is correct, which
+        is exactly why it's here: it turns an arithmetic mistake into a failed
+        transaction rather than a silent underflow.
+        """
+        if amount < 0:
+            _fail("Accounting error: negative release")
+        if amount == 0:
+            return
+        if amount > int(self.total_locked):
+            _fail("Accounting error: release exceeds locked funds")
+        self.total_locked = u256(int(self.total_locked) - amount)
+
+    def _credit(self, address_str: str, amount: int):
+        """Put wei on the payout ledger for `address_str` to pull later."""
+        if amount < 0:
+            _fail("Accounting error: negative credit")
+        if amount == 0:
+            return
+        if not address_str:
+            _fail("Accounting error: credit to empty address")
+        payee = Address(address_str)
+        current = int(self.payouts.get(payee, u256(0)))
+        self.payouts[payee] = u256(current + amount)
+        self.total_credited = u256(int(self.total_credited) + amount)
+
+    def _retain(self, amount: int):
+        """
+        Strand wei in the contract. Nothing pays this bucket out — no owner
+        role, no treasury, no withdrawal path. That is the whole design: a
+        slashed bond is destroyed, not redistributed.
+        """
+        if amount < 0:
+            _fail("Accounting error: negative retention")
+        if amount == 0:
+            return
+        self.protocol_retained = u256(int(self.protocol_retained) + amount)
+
+    def _send(self, to: Address, amount: int):
+        """
+        The one place native value leaves this contract.
+
+        `emit_transfer` queues a transfer message for consensus to apply, on
+        finalization. It is not a synchronous send: there is no return status
+        to check and no in-transaction failure to recover from, so a payee
+        cannot make the calling transaction revert. What protects the contract
+        from over-promising is the balance invariant, not a return code.
+        """
+        if amount <= 0:
+            _fail("Refusing to send a non-positive amount")
+        gl.get_contract_at(to).emit_transfer(value=u256(amount), on="finalized")

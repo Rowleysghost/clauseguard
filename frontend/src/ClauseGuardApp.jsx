@@ -79,6 +79,9 @@ const STATUS_META = {
   refunded:           { label: "REFUNDED",     tone: "refunded",  pipeStep: 4 },
   disputed:           { label: "CONTESTED",    tone: "disputed",  pipeStep: 3 },
   cancelled:          { label: "VACATED",      tone: "default",   pipeStep: 0 },
+  // Label stays short on purpose: Stamp is nowrap, and anything much longer
+  // than "AI-VERIFIED" overflows the DealCard header row.
+  resolved:           { label: "BY CONSENT",  tone: "released",  pipeStep: 4 },
 };
 
 const EVIDENCE_TYPES = [
@@ -95,6 +98,56 @@ const PIPELINE_STAGES = ["Filed", "Funded", "Exhibits", "Verdict", "Settled"];
 // deal can be re-verified up to this many times before on-chain appeals are
 // exhausted and parties must resolve off-chain via binding arbitration.
 const MAX_VERIFICATION_ATTEMPTS = 3;
+
+// Mirrors RESOLVABLE_STATUSES and RESOLUTION_OUTCOMES in
+// contracts/clauseguard.py. Both parties sign the same outcome and the contract
+// executes it; one signature only records a ballot. No bond is slashed — an
+// agreement is not an adjudicated breach.
+const RESOLVABLE_STATUSES = ["funded", "evidence_submitted", "disputed"];
+
+const RESOLUTION_OUTCOMES = [
+  {
+    value: "release",
+    label: "Release to seller",
+    blurb: "Seller is credited the full price. Both bonds go back whole.",
+  },
+  {
+    value: "split",
+    label: "Split the price",
+    blurb: "Half the price each, odd wei to the buyer. Both bonds go back whole.",
+  },
+  {
+    value: "refund",
+    label: "Refund the buyer",
+    blurb: "Buyer is credited the full price back. Both bonds go back whole.",
+  },
+];
+
+function resolutionLabel(outcome) {
+  return RESOLUTION_OUTCOMES.find((r) => r.value === outcome)?.label || outcome;
+}
+
+// Mirrors UNMET_CONDITION_CODES / DEADLINE_REASON_CODES in the contract. Since
+// N11 the validators return codes rather than prose, so the UI supplies the
+// wording. An unlisted code falls back to the code itself, spaces for
+// underscores, rather than rendering nothing.
+const REASON_LABELS = {
+  all_conditions_confirmed: "Every condition confirmed",
+  evidence_insufficient: "Evidence does not cover every condition",
+  evidence_contradicted: "Web content contradicts the evidence",
+  insufficient_independent_sources: "Too few independent sources agreed",
+  evidence_unfetchable: "An evidence URL could not be retrieved",
+  terms_ambiguous: "Terms too ambiguous to judge",
+  deadline_passed: "Deadline expired",
+  verification_error: "The verdict could not be read",
+  deadline_not_reached: "Deadline has not passed",
+  deadline_indeterminate: "No absolute deadline could be derived",
+  time_source_unavailable: "Live time source unreachable",
+};
+
+function reasonLabel(code) {
+  return REASON_LABELS[code] || String(code || "").replace(/_/g, " ");
+}
 
 const VERIFY_STAGES = [
   "Crawling web evidence",
@@ -1175,7 +1228,7 @@ function VerdictPanel({ c = C, verdictDetails }) {
           <div style={{ marginTop: 10, fontFamily: MONO, fontSize: 11.5, lineHeight: 1.7 }}>
             <div style={{ color: C.amber, marginBottom: 4 }}>UNMET CONDITIONS:</div>
             {verdictDetails.unmet_conditions.map((u, i) => (
-              <div key={i} style={{ color: C.phosphorDim }}>· {u}</div>
+              <div key={i} style={{ color: C.phosphorDim }}>· {reasonLabel(u)}</div>
             ))}
           </div>
         )}
@@ -1237,6 +1290,66 @@ function AppealPanel({ c = C, verdictDetails, attempts, attemptsLeft, appealsExh
       </div>
       <div style={{ marginTop: 8, fontSize: 11, color: c.textMute, fontFamily: MONO }}>
         {attemptsLeft} {attemptsLeft === 1 ? "ATTEMPT" : "ATTEMPTS"} REMAINING BEFORE APPEALS ARE EXHAUSTED.
+      </div>
+    </div>
+  );
+}
+
+// Mutual settlement — the escape route for a deal the tribunal can't finish.
+// Each party signs one of release / split / refund; two matching signatures
+// execute on-chain immediately. A single signature is only a recorded ballot,
+// so the panel shows both sides' standing positions.
+function ResolutionPanel({ c = C, deal, isSeller, onSign, busy }) {
+  const mine   = (isSeller ? deal.resolution_seller : deal.resolution_buyer) || "";
+  const theirs = (isSeller ? deal.resolution_buyer  : deal.resolution_seller) || "";
+  const ballot = (label, outcome, ink) => (
+    <span style={{ flex: 1, padding: "7px 10px", border: `1.5px solid ${outcome ? ink : c.border}`, background: outcome ? "rgba(28,26,21,0.03)" : "transparent", fontFamily: MONO, fontSize: 10.5, letterSpacing: "0.06em", color: outcome ? ink : c.textMute }}>
+      <span style={{ display: "block", fontSize: 9, letterSpacing: "0.16em", color: c.textMute, marginBottom: 3 }}>{label}</span>
+      {outcome ? resolutionLabel(outcome).toUpperCase() : "NOT SIGNED"}
+    </span>
+  );
+
+  return (
+    <div style={{ marginTop: 14, padding: "18px 18px 16px", border: `2px solid ${c.text}`, background: c.surface, position: "relative", animation: "cg-fadeup 450ms ease both" }}>
+      <div style={{ position: "absolute", top: -9, left: 14, background: c.surface, padding: "0 8px", fontFamily: MONO, fontSize: 9.5, letterSpacing: "0.16em", color: c.textDim, fontWeight: 700 }}>
+        RIDER B — SETTLEMENT BY CONSENT
+      </div>
+      <p style={{ margin: "4px 0 14px", fontSize: 12.5, color: c.textDim, lineHeight: 1.65 }}>
+        You and the other party can close this deal yourselves. Sign the same outcome and the contract executes it on the spot. Nobody&rsquo;s bond is slashed — an agreement isn&rsquo;t a breach. Sign a different outcome and nothing moves; only your position is recorded.
+      </p>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        {ballot("YOUR SIGNATURE", mine, c.accent)}
+        {ballot(isSeller ? "BUYER" : "SELLER", theirs, c.accent2)}
+      </div>
+
+      {theirs && !mine && (
+        <div style={{ marginBottom: 12, padding: "9px 12px", border: `2px dashed ${c.warn}`, background: "rgba(143,95,0,0.06)", fontSize: 12.5, color: c.text, fontWeight: 700, lineHeight: 1.5 }}>
+          The other party has signed {resolutionLabel(theirs)}. Sign the same and the deal closes immediately.
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {RESOLUTION_OUTCOMES.map((r) => {
+          const signed  = mine === r.value;
+          const closes  = theirs === r.value;
+          return (
+            <div key={r.value}>
+              <Btn
+                kind={closes ? "primary" : signed ? "success" : "ghost"}
+                c={c}
+                size="sm"
+                icon="pen"
+                style={{ width: "100%", justifyContent: "center" }}
+                disabled={signed || busy}
+                onClick={() => onSign(r.value)}
+              >
+                {signed ? `Signed · ${r.label}` : closes ? `${r.label} — closes now` : `Sign ${r.label}`}
+              </Btn>
+              <div style={{ fontSize: 11.5, color: c.textMute, marginTop: 5, lineHeight: 1.5, fontFamily: SERIF }}>{r.blurb}</div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -1636,10 +1749,10 @@ function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRef
         </div>
 
         <div>
-          <SectionLabel c={c}>{status === "disputed" ? "Appeal" : verdictDetails ? "Verdict" : verifying ? "Tribunal in session" : "Actions"}</SectionLabel>
+          <SectionLabel c={c}>{status === "disputed" ? "Appeal" : status === "resolved" ? "Settlement by consent" : verdictDetails ? "Verdict" : verifying ? "Tribunal in session" : "Actions"}</SectionLabel>
 
           {verifying && <VerifyingState c={c} stage={verifyStage} validators={validators} />}
-          {!verifying && verdictDetails && status !== "disputed" && <VerdictPanel c={c} verdictDetails={verdictDetails} />}
+          {!verifying && verdictDetails && !["disputed", "resolved"].includes(status) && <VerdictPanel c={c} verdictDetails={verdictDetails} />}
 
           {!verifying && (
             <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: verdictDetails ? 16 : 12 }}>
@@ -1726,6 +1839,30 @@ function DealDetailDialog({ c = C, deal, walletAddress, provider, onClose, onRef
                 <Btn kind="subtle" c={c} size="sm" icon="clock" style={{ justifyContent: "center" }} onClick={() => tx("Checking deadline…", () => GL.checkDeadline(walletAddress, provider, parseInt(deal.id)))}>Check deadline</Btn>
               )}
 
+              {RESOLVABLE_STATUSES.includes(status) && isParty && walletAddress && (
+                <ResolutionPanel
+                  c={c}
+                  deal={deal}
+                  isSeller={isSeller}
+                  busy={!!txMsg}
+                  onSign={(outcome) => tx(`Signing ${resolutionLabel(outcome).toLowerCase()}…`, () => GL.proposeResolution(walletAddress, provider, parseInt(deal.id), outcome))}
+                />
+              )}
+
+              {status === "resolved" && (
+                <div style={{ padding: "16px 18px", border: `2px solid ${c.success}`, background: "rgba(46,94,58,0.06)" }}>
+                  <div style={{ marginBottom: 10 }}>
+                    <Stamp color={c.success} size={11} rotate={-3}>Closed by agreement</Stamp>
+                  </div>
+                  <p style={{ margin: 0, fontSize: 12.5, color: c.textDim, lineHeight: 1.65 }}>
+                    Both parties signed{settlement?.resolution ? <> <strong style={{ color: c.text }}>{resolutionLabel(settlement.resolution).toLowerCase()}</strong></> : " the same outcome"} and the contract executed it. No bond was slashed.
+                    {settlement && (
+                      <> Seller credited <strong style={{ color: c.text }}>{fmtGen(settlement.credited_seller)} GEN</strong>, buyer credited <strong style={{ color: c.text }}>{fmtGen(settlement.credited_buyer)} GEN</strong>.</>
+                    )}
+                  </p>
+                </div>
+              )}
+
               {status === "verified" && isParty && (
                 <Btn kind="success" c={c} icon="check" style={{ justifyContent: "center" }} onClick={() => tx("Settling deal…", () => GL.settleDeal(walletAddress, provider, parseInt(deal.id)))}>Settle &amp; release funds</Btn>
               )}
@@ -1772,8 +1909,8 @@ function DealCard({ deal, walletAddress, c = C, onOpen }) {
         {caseNo(deal.id)}
       </div>
       <div style={{ background: c.bgElev, border: `2px solid ${c.text}`, borderRadius: 2, boxShadow: c.shadowHard, padding: "22px 22px 20px", height: "100%", display: "flex", flexDirection: "column", position: "relative", overflow: "hidden" }}>
-        {/* ghost watermark seal on settled/verified */}
-        {(status === "settled" || status === "verified") && (
+        {/* ghost watermark seal on a closed case */}
+        {(status === "settled" || status === "verified" || status === "resolved") && (
           <div aria-hidden style={{ position: "absolute", right: -28, bottom: -30, opacity: 0.1 }}>
             <SealMark size={140} color={c.success} />
           </div>
@@ -1888,6 +2025,37 @@ export default function ClauseGuardApp() {
 
   useEffect(() => { loadDeals(); }, [loadDeals]);
 
+  // Wei the payout ledger owes the connected wallet. Finalizers only credit;
+  // the payee pulls with `withdraw()`. Swallowed on failure because the
+  // currently deployed contract has no `get_payout` — against it the whole
+  // banner just never appears.
+  const [owed, setOwed] = useState("0");
+  const loadOwed = useCallback(async () => {
+    if (!walletAddress) { setOwed("0"); return; }
+    try {
+      const wei = await GL.fetchPayout(walletAddress);
+      setOwed(String(wei ?? "0"));
+    } catch { setOwed("0"); }
+  }, [walletAddress]);
+
+  useEffect(() => { loadOwed(); }, [loadOwed, deals]);
+
+  let owedWei = 0n;
+  try { owedWei = BigInt(owed || "0"); } catch {}
+
+  const [withdrawing, setWithdrawing] = useState(false);
+  const doWithdraw = useCallback(async () => {
+    try {
+      setWithdrawing(true);
+      await GL.withdraw(walletAddress, provider);
+      toast("Withdrawal complete", "success");
+      await loadOwed();
+      await loadDeals();
+    } catch (err) {
+      toast(err.message || "Withdrawal failed", "error");
+    } finally { setWithdrawing(false); }
+  }, [walletAddress, provider, toast, loadOwed, loadDeals]);
+
   const filteredDeals = deals.filter((d) => {
     const tabMatch = tab === "mine"
       ? walletAddress && (d.seller?.toLowerCase() === walletAddress.toLowerCase() || d.buyer?.toLowerCase() === walletAddress.toLowerCase())
@@ -1923,6 +2091,25 @@ export default function ClauseGuardApp() {
             </div>
           </div>
         </Reveal>
+
+        {owedWei > 0n && (
+          <Reveal>
+            <div style={{ marginBottom: 30, padding: "20px 24px", border: `2px solid ${c.success}`, background: "rgba(46,94,58,0.06)", boxShadow: c.shadowHardSm, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 20, flexWrap: "wrap", position: "relative" }}>
+              <div style={{ position: "absolute", top: -14, left: 18 }}><Stamp color={c.success} size={11} rotate={-3}>Funds awaiting collection</Stamp></div>
+              <div style={{ marginTop: 4 }}>
+                <div style={{ fontFamily: SERIF, fontWeight: 900, fontSize: 22, color: c.text, marginBottom: 4 }}>
+                  {fmtGen(owed)} GEN is yours to collect.
+                </div>
+                <p style={{ margin: 0, fontSize: 12.5, color: c.textDim, lineHeight: 1.6, maxWidth: 560 }}>
+                  Settled and refunded deals credit a ledger rather than pushing wei at you, so a wallet that can&rsquo;t receive value can only ever stall its own payout. Collect the whole balance in one transaction.
+                </p>
+              </div>
+              <Btn kind="success" c={c} icon="wallet" disabled={withdrawing} onClick={doWithdraw}>
+                {withdrawing ? "Collecting…" : "Collect funds"}
+              </Btn>
+            </div>
+          </Reveal>
+        )}
 
         {dealsLoading && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 22 }}>

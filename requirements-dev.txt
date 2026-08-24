@@ -1,0 +1,18 @@
+# Dev dependencies for the ClauseGuard contract test suite.
+#
+# The money suite needs nothing but pytest — `tests/stubs/genlayer.py` fakes the
+# GenVM runtime, which cannot be pip-installed (it only exists inside the VM).
+#
+#     python3 -m pytest tests
+#     python3 tests/mutation_check.py
+#
+# No --ignore flag needed: tests/gltest/conftest.py opts itself out via
+# collect_ignore unless Docker and genlayer-test are both present.
+#
+# The gltest smoke tests under tests/gltest/ additionally need Docker and a
+# running GenLayer Studio. Uncomment genlayer-test to run them, and set
+# CLAUSEGUARD_GLTEST=1.
+
+pytest==8.3.4
+
+# genlayer-test==0.1.2
